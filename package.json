@@ -20,6 +20,7 @@
     "typecheck": "turbo run typecheck",
     "lint": "oxlint --report-unused-disable-directives",
     "test": "turbo run test",
+    "smoke-test": "bun run --cwd apps/t3 smoke-test",
     "fmt": "oxfmt",
     "prepack": "node scripts/prepack.mjs",
     "build:contracts": "bun run --cwd packages/contracts build"
