@@ -76,6 +76,7 @@ Runtime command semantics:
 - When replaced by a newer connection, the previous active websocket is closed with code `4000`.
 - Replacement closes use reason string `replaced-by-new-client` for deterministic client handling.
 - Renderer websocket connection errors now preserve close metadata (`code`/`reason`) to improve reconnect diagnostics.
+- In-flight renderer requests now surface unauthorized/replacement disconnect causes explicitly.
 - Runtime validates request payloads with shared Zod contracts.
 - Codex execution sandbox policy (`read-only`, `workspace-write`, `danger-full-access`) is still selected per session startup options.
 - Static HTML responses are served with `Cache-Control: no-store`; built `/assets/*` files are served with long-lived immutable cache headers.
