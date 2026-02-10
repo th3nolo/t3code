@@ -893,8 +893,10 @@ describe("runtimeApiServer", () => {
     const firstClient = await connectClient(server.wsUrl);
     await firstClient.nextMessage();
 
-    const firstClose = new Promise<{ code: number }>((resolve) => {
-      firstClient.socket.once("close", (code) => resolve({ code }));
+    const firstClose = new Promise<{ code: number; reason: string }>((resolve) => {
+      firstClient.socket.once("close", (code, reason) =>
+        resolve({ code, reason: reason.toString() }),
+      );
     });
 
     const secondClient = await connectClient(server.wsUrl);
@@ -902,6 +904,7 @@ describe("runtimeApiServer", () => {
 
     const closed = await withTimeout(firstClose);
     expect(closed.code).toBe(4000);
+    expect(closed.reason).toBe("replaced-by-new-client");
 
     const response = await sendRequest(
       secondClient.socket,
@@ -925,8 +928,10 @@ describe("runtimeApiServer", () => {
     const firstClient = await connectClient(server.wsUrl);
     await firstClient.nextMessage();
 
-    const firstClose = new Promise<{ code: number }>((resolve) => {
-      firstClient.socket.once("close", (code) => resolve({ code }));
+    const firstClose = new Promise<{ code: number; reason: string }>((resolve) => {
+      firstClient.socket.once("close", (code, reason) =>
+        resolve({ code, reason: reason.toString() }),
+      );
     });
 
     const secondClient = await connectClient(server.wsUrl);
@@ -934,6 +939,7 @@ describe("runtimeApiServer", () => {
 
     const closed = await withTimeout(firstClose);
     expect(closed.code).toBe(4000);
+    expect(closed.reason).toBe("replaced-by-new-client");
 
     const response = await sendRequest(
       secondClient.socket,

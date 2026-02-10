@@ -1688,6 +1688,54 @@ async function main() {
       ws.send(encodedBinaryRequest);
     });
 
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () =>
+          reject(
+            new Error("Smoke test failed: arraybuffer websocket app.health request timed out."),
+          ),
+        20_000,
+      );
+      const onMessage = (event) => {
+        let message;
+        try {
+          message = JSON.parse(String(event.data));
+        } catch {
+          return;
+        }
+
+        if (message.type !== "response" || message.id !== "smoke-arraybuffer-health") {
+          return;
+        }
+        if (
+          message.ok !== true ||
+          message.result?.status !== "ok" ||
+          message.result?.launchCwd !== appRoot
+        ) {
+          clearTimeout(timer);
+          ws.removeEventListener("message", onMessage);
+          reject(
+            new Error("Smoke test failed: arraybuffer websocket app.health response mismatch."),
+          );
+          return;
+        }
+
+        clearTimeout(timer);
+        ws.removeEventListener("message", onMessage);
+        resolve();
+      };
+
+      ws.addEventListener("message", onMessage);
+      const encodedArrayBufferRequest = new TextEncoder().encode(
+        JSON.stringify({
+          type: "request",
+          id: "smoke-arraybuffer-health",
+          method: "app.health",
+        }),
+      );
+      ws.send(encodedArrayBufferRequest.buffer);
+    });
+
     ws.send("not-json");
     ws.send(JSON.stringify({ foo: "bar" }));
     const postMalformedHealthResponse = await sendWsRequest(ws, {
