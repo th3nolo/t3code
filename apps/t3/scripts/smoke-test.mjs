@@ -2303,8 +2303,11 @@ async function main() {
       bootstrapResponse.result?.provider !== "codex" ||
       typeof bootstrapResponse.result?.model !== "string" ||
       bootstrapResponse.result.model.length === 0 ||
+      bootstrapResponse.result?.bootstrapError !== undefined ||
       typeof bootstrapResponse.result?.session?.sessionId !== "string" ||
-      bootstrapResponse.result.session.sessionId.length === 0
+      bootstrapResponse.result.session.sessionId.length === 0 ||
+      bootstrapResponse.result.session.status !== "ready" ||
+      bootstrapResponse.result.session.threadId !== "thread-fake"
     ) {
       throw new Error("Smoke test failed: app.bootstrap response payload mismatch.");
     }
@@ -2325,7 +2328,7 @@ async function main() {
     const listedIncludesBootstrap = listedSessionsResponse.result.some(
       (session) => session?.sessionId === bootstrapSessionId,
     );
-    if (!bootstrapResponse.result.bootstrapError && !listedIncludesBootstrap) {
+    if (!listedIncludesBootstrap) {
       throw new Error(
         `Smoke test failed: providers.listSessions did not include bootstrap session ${bootstrapSessionId}.`,
       );
