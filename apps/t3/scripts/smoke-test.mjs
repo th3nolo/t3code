@@ -1675,6 +1675,7 @@ async function main() {
     ) {
       throw new Error("Smoke test failed: app.bootstrap response payload mismatch.");
     }
+    const bootstrapSessionId = bootstrapResponse.result.session.sessionId;
 
     const listedSessionsResponse = await sendWsRequest(ws, {
       id: "smoke-providers-list-sessions",
@@ -1687,6 +1688,14 @@ async function main() {
       if (typeof session?.sessionId !== "string" || session.sessionId.length === 0) {
         throw new Error("Smoke test failed: providers.listSessions entry missing sessionId.");
       }
+    }
+    const listedIncludesBootstrap = listedSessionsResponse.result.some(
+      (session) => session?.sessionId === bootstrapSessionId,
+    );
+    if (!bootstrapResponse.result.bootstrapError && !listedIncludesBootstrap) {
+      throw new Error(
+        `Smoke test failed: providers.listSessions did not include bootstrap session ${bootstrapSessionId}.`,
+      );
     }
 
     const todoTitle = `Smoke todo ${String(backendPort)}-${String(webPort)}-${Date.now()}`;
