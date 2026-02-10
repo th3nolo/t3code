@@ -62,6 +62,7 @@ Runtime command semantics:
 - Install Codex CLI so `codex` is on your PATH.
 - Authenticate Codex before running CodeThing (for example via API key or ChatGPT auth supported by Codex).
 - CodeThing starts the server via `codex app-server` per session.
+- Note: test suites use an in-process fake `codex app-server` shim, so CI/local tests do not require the real Codex CLI.
 
 ## Runtime boundary model
 
@@ -132,6 +133,7 @@ Mode changes apply across all threads. Existing live sessions are restarted so o
 - `bun run build`: builds contracts, renderer static assets, and `t3` CLI bundle.
 - `bun run typecheck`: strict TypeScript checks for all packages.
 - `bun run test`: runs workspace tests.
+- `bun run smoke-test`: runs end-to-end CLI/WebSocket smoke coverage (against the fake Codex app-server shim).
 - `bun run --cwd apps/t3 dev`: run the CLI directly in dev mode.
 
 ## Provider architecture
