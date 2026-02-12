@@ -17,14 +17,31 @@ function asBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
+function normalizeType(raw: string | undefined): string {
+  if (!raw) return "";
+  return raw.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+}
+
+function isAgentMessageType(raw: string | undefined): boolean {
+  const normalized = normalizeType(raw);
+  return normalized.includes("agentmessage") || normalized.includes("assistantmessage");
+}
+
 function readThreadId(event: ProviderRawEvent): string | undefined {
   if (event.threadId) return event.threadId;
   const payload = asObject(event.payload);
   const thread = asObject(payload?.thread);
+  const message = asObject(payload?.message);
+  const msg = asObject(payload?.msg);
   return (
     asString(payload?.threadId) ??
     asString(payload?.thread_id) ??
-    asString(thread?.id)
+    asString(payload?.conversationId) ??
+    asString(thread?.id) ??
+    asString(message?.threadId) ??
+    asString(message?.thread_id) ??
+    asString(msg?.threadId) ??
+    asString(msg?.thread_id)
   );
 }
 
@@ -32,14 +49,36 @@ function readTurnId(event: ProviderRawEvent): string | undefined {
   if (event.turnId) return event.turnId;
   const payload = asObject(event.payload);
   const turn = asObject(payload?.turn);
-  return asString(payload?.turnId) ?? asString(payload?.turn_id) ?? asString(turn?.id);
+  const message = asObject(payload?.message);
+  const msg = asObject(payload?.msg);
+  return (
+    asString(payload?.turnId) ??
+    asString(payload?.turn_id) ??
+    asString(turn?.id) ??
+    asString(message?.turnId) ??
+    asString(message?.turn_id) ??
+    asString(msg?.turnId) ??
+    asString(msg?.turn_id)
+  );
 }
 
 function readItemId(event: ProviderRawEvent): string | undefined {
   if (event.itemId) return event.itemId;
   const payload = asObject(event.payload);
   const item = asObject(payload?.item);
-  return asString(payload?.itemId) ?? asString(payload?.item_id) ?? asString(item?.id);
+  const message = asObject(payload?.message);
+  const msg = asObject(payload?.msg);
+  return (
+    asString(payload?.itemId) ??
+    asString(payload?.item_id) ??
+    asString(payload?.messageId) ??
+    asString(payload?.message_id) ??
+    asString(payload?.msgId) ??
+    asString(payload?.msg_id) ??
+    asString(item?.id) ??
+    asString(message?.id) ??
+    asString(msg?.id)
+  );
 }
 
 function mapApprovalDecision(decision: string): "accept" | "accept_for_session" | "decline" | "cancel" | "timed_out" {
@@ -252,7 +291,12 @@ export class ProviderEventNormalizer implements ProviderEventAdapter {
     }
 
     if (raw.method === "item/agentMessage/delta" && threadId && itemId) {
-      const delta = raw.textDelta ?? asString(payload?.delta) ?? "";
+      const delta =
+        raw.textDelta ??
+        asString(payload?.delta) ??
+        asString(asObject(payload?.message)?.delta) ??
+        asString(asObject(payload?.msg)?.delta) ??
+        "";
       if (delta.length > 0) {
         events.push({
           type: "message.delta",
@@ -268,7 +312,11 @@ export class ProviderEventNormalizer implements ProviderEventAdapter {
 
     if (raw.method === "item/completed" && threadId) {
       const item = asObject(payload?.item);
-      if (asString(item?.type) === "agentMessage") {
+      const itemType = asString(item?.type);
+      const isAgentMessage =
+        isAgentMessageType(itemType) ||
+        (!!raw.itemId && raw.itemId.startsWith("msg_"));
+      if (isAgentMessage) {
         const messageId = asString(item?.id) ?? itemId;
         const text = asString(item?.text) ?? "";
         if (messageId) {
@@ -352,6 +400,22 @@ export class ProviderEventNormalizer implements ProviderEventAdapter {
     if (raw.method === "item/started" || raw.method === "item/completed") {
       const item = asObject(payload?.item);
       const itemType = asString(item?.type);
+      const itemText = asString(item?.text);
+      const isAgentMessage = isAgentMessageType(itemType);
+      if (raw.method === "item/started" && threadId && itemId && isAgentMessage) {
+        if (itemText && itemText.length > 0) {
+          events.push({
+            type: "message.delta",
+            sessionId: raw.sessionId,
+            threadId,
+            ...(turnId ? { turnId } : {}),
+            messageId: itemId,
+            role: "assistant",
+            delta: itemText,
+          });
+        }
+      }
+
       if (threadId && itemId && isActionableItemType(itemType)) {
         events.push({
           type: "activity",

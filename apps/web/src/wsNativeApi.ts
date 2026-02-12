@@ -68,6 +68,7 @@ export function createWsNativeApi(): NativeApi {
   let streamOpenInFlight: Promise<ProvidersOpenStreamResult> | null = null;
   let streamOpen = false;
   let streamOpening = false;
+  let pendingCloseAfterOpen = false;
 
   const openStream = async (
     overrides?: ProvidersOpenStreamInput,
@@ -89,7 +90,17 @@ export function createWsNativeApi(): NativeApi {
     streamOpenInFlight = transport
       .request<ProvidersOpenStreamResult>(WS_METHODS.providersOpenStream, openInput)
       .then((result) => {
-        streamOpen = true;
+        const hasActiveListeners = providerStreamListeners.size > 0;
+        const shouldCloseAfterOpen = pendingCloseAfterOpen && !hasActiveListeners;
+
+        streamOpen = !shouldCloseAfterOpen;
+        pendingCloseAfterOpen = false;
+
+        if (shouldCloseAfterOpen) {
+          void transport.request(WS_METHODS.providersCloseStream).catch(() => {
+            // Ignore close errors while reconnect logic restores transport.
+          });
+        }
 
         if (result.mode !== "replay") {
           // Resync modes can legally move the cursor backwards after server restart.
@@ -110,6 +121,7 @@ export function createWsNativeApi(): NativeApi {
     if (providerStreamListeners.size === 0 || streamOpen) {
       return;
     }
+    pendingCloseAfterOpen = false;
 
     void openStream().catch(() => {
       // Ignore open failures. Reconnect lifecycle retries automatically.
@@ -204,17 +216,25 @@ export function createWsNativeApi(): NativeApi {
       listSessions: () => transport.request(WS_METHODS.providersListSessions),
       openStream: (input) => openStream(input),
       closeStream: async () => {
+        pendingCloseAfterOpen = false;
         streamOpen = false;
         await transport.request(WS_METHODS.providersCloseStream);
       },
       onStream: (callback) => {
         providerStreamListeners.add(callback);
+        pendingCloseAfterOpen = false;
         ensureStreamOpen();
 
         return () => {
           providerStreamListeners.delete(callback);
           if (providerStreamListeners.size === 0) {
+            if (streamOpenInFlight) {
+              pendingCloseAfterOpen = true;
+              return;
+            }
+
             streamOpen = false;
+            pendingCloseAfterOpen = false;
             void transport.request(WS_METHODS.providersCloseStream).catch(() => {
               // Ignore close errors while transport reconnects.
             });

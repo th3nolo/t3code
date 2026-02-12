@@ -102,6 +102,69 @@ describe("ProviderEventNormalizer", () => {
     expect(normalized).toHaveLength(0);
   });
 
+  it("maps message delta events when payload uses msg/message fallback fields", () => {
+    const normalizer = new ProviderEventNormalizer();
+
+    const normalized = normalizer.normalize(
+      makeRawEvent({
+        method: "item/agentMessage/delta",
+        threadId: undefined,
+        turnId: undefined,
+        itemId: undefined,
+        payload: {
+          msg: {
+            id: "msg-1",
+            thread_id: "thread-1",
+            turn_id: "turn-1",
+          },
+          delta: "hello",
+        },
+      }),
+      makeSession(),
+    );
+
+    const delta = normalized.find((event) => event.type === "message.delta");
+    expect(delta).toBeDefined();
+    if (!delta || delta.type !== "message.delta") {
+      throw new Error("expected message.delta event");
+    }
+
+    expect(delta.messageId).toBe("msg-1");
+    expect(delta.threadId).toBe("thread-1");
+    expect(delta.turnId).toBe("turn-1");
+    expect(delta.delta).toBe("hello");
+  });
+
+  it("maps assistant message completion with assistantMessage type aliases", () => {
+    const normalizer = new ProviderEventNormalizer();
+
+    const normalized = normalizer.normalize(
+      makeRawEvent({
+        method: "item/completed",
+        itemId: "msg_abc",
+        payload: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id: "msg_abc",
+            type: "assistant_message",
+            text: "done",
+          },
+        },
+      }),
+      makeSession(),
+    );
+
+    const completed = normalized.find((event) => event.type === "message.completed");
+    expect(completed).toBeDefined();
+    if (!completed || completed.type !== "message.completed") {
+      throw new Error("expected message.completed event");
+    }
+
+    expect(completed.messageId).toBe("msg_abc");
+    expect(completed.text).toBe("done");
+  });
+
   it("creates debug.raw wrappers", () => {
     const normalizer = new ProviderEventNormalizer();
     const raw = makeRawEvent({ method: "item/reasoning/summaryPartAdded" });

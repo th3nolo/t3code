@@ -17,6 +17,11 @@ If a tradeoff is required, choose correctness and robustness over short-term con
 - `apps/web`: React/Vite UI. Owns session UX, conversation/event rendering, and client-side state. Connects to the server via WebSocket.
 - `packages/contracts`: Shared Zod schemas and TypeScript contracts for provider events, WebSocket protocol, and model/session types.
 
+## Provider WS API Docs Sync (Required)
+- The canonical provider API spec lives at `docs/provider-ws-api.md`.
+- Any change to provider WS contracts, methods/channels, canonical event shapes, normalization mappings, replay/backpressure behavior, or client apply semantics must update `docs/provider-ws-api.md` in the same PR.
+- If code and docs diverge, treat it as a bug and resolve before merge.
+
 ## Codex App Server (Important)
 T3 Code is currently Codex-first. The server starts `codex app-server` (JSON-RPC over stdio) per provider session, then streams structured events to the browser through WebSocket push messages.
 

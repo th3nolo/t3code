@@ -184,6 +184,12 @@ function eventThreadId(event: ProviderCoreEvent): string | undefined {
 }
 
 function shouldIgnoreForeignThreadEvent(thread: Thread, event: ProviderCoreEvent): boolean {
+  if (event.type === "session.updated") {
+    // Session snapshots are authoritative for thread identity and should never
+    // be blocked by stale local thread bindings.
+    return false;
+  }
+
   const emittedThreadId = eventThreadId(event);
   if (!emittedThreadId) {
     return false;
@@ -191,10 +197,6 @@ function shouldIgnoreForeignThreadEvent(thread: Thread, event: ProviderCoreEvent
 
   const expectedThreadId = thread.session?.threadId ?? thread.codexThreadId;
   if (!expectedThreadId || emittedThreadId === expectedThreadId) {
-    return false;
-  }
-
-  if (event.type === "session.updated" && thread.session?.status === "connecting") {
     return false;
   }
 

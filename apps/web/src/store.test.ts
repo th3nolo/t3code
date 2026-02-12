@@ -119,6 +119,24 @@ describe("store reducer stream integration", () => {
     expect(next.lastProviderSeq).toBe(1);
   });
 
+  it("always applies session.updated even when thread id changes", () => {
+    const state = makeState(makeThread({ codexThreadId: "thr_old" }));
+    const next = reducer(state, {
+      type: "APPLY_STREAM_FRAME",
+      frame: makeEventFrame({
+        type: "session.updated",
+        session: makeSession({
+          threadId: "thr_new",
+          updatedAt: "2026-02-09T00:00:01.000Z",
+        }),
+      }),
+      activeAssistantMessageRef: { current: null },
+    });
+
+    expect(next.threads[0]?.codexThreadId).toBe("thr_new");
+    expect(next.threads[0]?.session?.threadId).toBe("thr_new");
+  });
+
   it("applies snapshot frames as authoritative baseline", () => {
     const state = makeState(
       makeThread({
