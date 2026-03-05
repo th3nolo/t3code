@@ -104,8 +104,34 @@ describe("resolveProcessLaunchPlan", () => {
 
       expect(plan.command).toBe("C:\\Windows\\System32\\cmd.exe");
       expect(plan.args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
-      expect(plan.args[3]).toBe(`"${wrapperPath}" "C:\\repo\\a^&b.ts"`);
+      expect(plan.args[3]).toBe(`"${wrapperPath}" "C:\\repo\\a&b.ts"`);
       expect(plan.shell).toBe(false);
+    });
+  });
+
+  it("resolves relative batch launchers against the configured cwd", () => {
+    withTempDir((dir) => {
+      const wrapperPath = path.join(dir, "code.CMD");
+      fs.writeFileSync(wrapperPath, "@echo off\r\n");
+
+      const plan = resolveProcessLaunchPlan("./code", ["pkg@^1.0"], {
+        cwd: dir,
+        env: {
+          PATHEXT: ".COM;.EXE;.BAT;.CMD",
+          COMSPEC: "C:\\Windows\\System32\\cmd.exe",
+        },
+        inheritParentEnv: false,
+        runtimeEnvironment: {
+          platform: "windows",
+          pathStyle: "windows",
+          isWsl: false,
+          windowsInteropMode: "windows-native",
+          wslDistroName: null,
+        },
+      });
+
+      expect(plan.command).toBe("C:\\Windows\\System32\\cmd.exe");
+      expect(plan.args[3]).toBe(`"${wrapperPath}" "pkg@^1.0"`);
     });
   });
 
@@ -166,7 +192,7 @@ describe("makeRuntimeCommand", () => {
       });
 
       expect(command.command).toBe("C:\\Windows\\System32\\cmd.exe");
-      expect(command.args).toEqual(["/d", "/s", "/c", `"${wrapperPath}" "C:\\repo\\a^&b.ts"`]);
+      expect(command.args).toEqual(["/d", "/s", "/c", `"${wrapperPath}" "C:\\repo\\a&b.ts"`]);
       expect(command.options.shell).toBe(false);
     });
   });

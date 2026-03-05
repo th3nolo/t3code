@@ -16,8 +16,8 @@ import {
   type ProviderSessionStartInput,
   type ProviderTurnStartResult,
 } from "@t3tools/contracts";
-import type * as NodeServices from "@effect/platform-node/NodeServices";
-import { Cause, Effect, Exit, ServiceMap, Scope, Stream } from "effect";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { Cause, Effect, Exit, ManagedRuntime, ServiceMap, Scope, Stream } from "effect";
 import type { ChildProcessSpawner } from "effect/unstable/process";
 import { makeRuntimeCommand, spawnManagedCommand } from "./processRunner";
 
@@ -164,6 +164,9 @@ export interface CodexAppServerManagerEvents {
 
 export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEvents> {
   private readonly sessions = new Map<ProviderSessionId, CodexSessionContext>();
+  private readonly ownedRuntime:
+    | ManagedRuntime.ManagedRuntime<NodeServices.NodeServices, unknown>
+    | null;
   private readonly runPromise: <A, E>(
     effect: Effect.Effect<A, E, NodeServices.NodeServices>,
     options?: Effect.RunOptions | undefined,
@@ -171,13 +174,15 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
 
   constructor(services?: ServiceMap.ServiceMap<NodeServices.NodeServices>) {
     super();
-    this.runPromise = services
-      ? Effect.runPromiseWith(services)
-      : ((effect, options) =>
-          Effect.runPromise(
-            effect as unknown as Effect.Effect<unknown, never>,
-            options,
-          )) as typeof this.runPromise;
+    if (services) {
+      this.ownedRuntime = null;
+      this.runPromise = Effect.runPromiseWith(services);
+      return;
+    }
+
+    const runtime = ManagedRuntime.make(NodeServices.layer);
+    this.ownedRuntime = runtime;
+    this.runPromise = runtime.runPromise.bind(runtime);
   }
 
   async startSession(input: ProviderSessionStartInput): Promise<ProviderSession> {
@@ -519,6 +524,10 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
   stopAll(): void {
     for (const sessionId of this.sessions.keys()) {
       this.stopSession(sessionId);
+    }
+
+    if (this.ownedRuntime) {
+      void this.ownedRuntime.dispose();
     }
   }
 

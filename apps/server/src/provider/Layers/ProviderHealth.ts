@@ -32,6 +32,7 @@ export interface CommandResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly code: number | null;
+  readonly signal?: NodeJS.Signals | null;
   readonly timedOut?: boolean;
 }
 
@@ -76,6 +77,11 @@ function detailFromResult(
   if (stderr) return stderr;
   const stdout = nonEmptyTrimmed(result.stdout);
   if (stdout) return stdout;
+  if (result.code === null) {
+    return result.signal
+      ? `Command exited from signal ${result.signal}.`
+      : "Command exited without an exit code.";
+  }
   if (result.code !== 0) {
     return `Command exited with code ${result.code}.`;
   }
@@ -208,6 +214,7 @@ const defaultRunCodexCommand: RunProviderHealthCommand = async (args) => {
     stdout: result.stdout,
     stderr: result.stderr,
     code: result.code,
+    signal: result.signal,
     timedOut: result.timedOut,
   } satisfies CommandResult;
 };

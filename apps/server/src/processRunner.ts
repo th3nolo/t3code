@@ -5,13 +5,19 @@ import {
   spawnSync,
   type StdioOptions,
 } from "node:child_process";
-import { statSync } from "node:fs";
 import { extname, join } from "node:path";
 
 import type { ServerRuntimeEnvironment } from "@t3tools/contracts";
 import { Effect, Exit, Scope } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
+import {
+  resolveCommandCandidates,
+  resolveExecutableFile,
+  resolvePathEnvironmentVariable,
+  resolveWindowsPathExtensions,
+  stripWrappingQuotes,
+} from "./commandResolution";
 import { detectServerRuntimeEnvironment } from "./runtimeEnvironment";
 
 interface ProcessSpawnBaseOptions {
@@ -27,11 +33,12 @@ interface RuntimeShellOptions {
 }
 
 interface ProcessLaunchPlanOptions extends RuntimeShellOptions {
+  cwd?: string | undefined;
   env?: NodeJS.ProcessEnv | Record<string, string | undefined> | undefined;
   inheritParentEnv?: boolean | undefined;
 }
 
-export interface ProcessSpawnOptions extends ProcessSpawnBaseOptions {
+interface ProcessSpawnOptions extends ProcessSpawnBaseOptions {
   stdio?: StdioOptions | undefined;
   detached?: boolean | undefined;
 }
@@ -40,7 +47,7 @@ export interface RuntimeCommandOptions extends ChildProcess.CommandOptions {
   runtimeEnvironment?: ServerRuntimeEnvironment | undefined;
 }
 
-export interface ProcessSpawnSyncOptions extends ProcessSpawnBaseOptions {
+interface ProcessSpawnSyncOptions extends ProcessSpawnBaseOptions {
   stdio?: StdioOptions | undefined;
   detached?: boolean | undefined;
   encoding?: BufferEncoding | undefined;
@@ -93,71 +100,6 @@ function resolveRuntimeEnvironment(
   return runtimeEnvironment ?? detectServerRuntimeEnvironment();
 }
 
-function resolvePathEnvironmentVariable(env: NodeJS.ProcessEnv): string {
-  return env.PATH ?? env.Path ?? env.path ?? "";
-}
-
-function resolveWindowsPathExtensions(env: NodeJS.ProcessEnv): ReadonlyArray<string> {
-  const rawValue = env.PATHEXT;
-  const fallback = [".COM", ".EXE", ".BAT", ".CMD"];
-  if (!rawValue) return fallback;
-
-  const parsed = rawValue
-    .split(";")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0)
-    .map((entry) => (entry.startsWith(".") ? entry.toUpperCase() : `.${entry.toUpperCase()}`));
-  return parsed.length > 0 ? Array.from(new Set(parsed)) : fallback;
-}
-
-function resolveCommandCandidates(
-  command: string,
-  windowsPathExtensions: ReadonlyArray<string>,
-): ReadonlyArray<string> {
-  const extension = extname(command);
-  const normalizedExtension = extension.toUpperCase();
-
-  if (extension.length > 0 && windowsPathExtensions.includes(normalizedExtension)) {
-    const commandWithoutExtension = command.slice(0, -extension.length);
-    return Array.from(
-      new Set([
-        command,
-        `${commandWithoutExtension}${normalizedExtension}`,
-        `${commandWithoutExtension}${normalizedExtension.toLowerCase()}`,
-      ]),
-    );
-  }
-
-  const candidates: string[] = [command];
-  for (const candidateExtension of windowsPathExtensions) {
-    candidates.push(`${command}${candidateExtension}`);
-    candidates.push(`${command}${candidateExtension.toLowerCase()}`);
-  }
-  return Array.from(new Set(candidates));
-}
-
-function stripWrappingQuotes(value: string): string {
-  return value.replace(/^"+|"+$/g, "");
-}
-
-function isExecutableFile(
-  filePath: string,
-  windowsPathExtensions: ReadonlyArray<string>,
-): boolean {
-  try {
-    const stat = statSync(filePath);
-    if (!stat.isFile()) return false;
-    const extension = extname(filePath);
-    if (extension.length === 0) return false;
-    if (windowsPathExtensions.length === 0) {
-      return true;
-    }
-    return windowsPathExtensions.includes(extension.toUpperCase());
-  } catch {
-    return false;
-  }
-}
-
 function resolveEffectiveEnvironment(options: ProcessLaunchPlanOptions): NodeJS.ProcessEnv {
   const env = (options.env ?? {}) as NodeJS.ProcessEnv;
   if (options.inheritParentEnv === false) {
@@ -173,9 +115,10 @@ function resolveEffectiveEnvironment(options: ProcessLaunchPlanOptions): NodeJS.
 function resolveWindowsCommand(
   command: string,
   env: NodeJS.ProcessEnv,
+  cwd?: string,
 ): ResolvedWindowsCommand | null {
   const windowsPathExtensions = resolveWindowsPathExtensions(env);
-  const candidates = resolveCommandCandidates(command, windowsPathExtensions);
+  const candidates = resolveCommandCandidates(command, "win32", windowsPathExtensions);
 
   const classify = (filePath: string): ResolvedWindowsCommand => {
     const extension = extname(filePath).toUpperCase();
@@ -187,8 +130,13 @@ function resolveWindowsCommand(
 
   if (command.includes("/") || command.includes("\\")) {
     for (const candidate of candidates) {
-      if (isExecutableFile(candidate, windowsPathExtensions)) {
-        return classify(candidate);
+      const resolvedCandidate = resolveExecutableFile(candidate, {
+        platform: "win32",
+        windowsPathExtensions,
+        cwd,
+      });
+      if (resolvedCandidate) {
+        return classify(resolvedCandidate);
       }
     }
     return null;
@@ -202,7 +150,12 @@ function resolveWindowsCommand(
   for (const pathEntry of pathEntries) {
     for (const candidate of candidates) {
       const candidatePath = join(pathEntry, candidate);
-      if (isExecutableFile(candidatePath, windowsPathExtensions)) {
+      if (
+        resolveExecutableFile(candidatePath, {
+          platform: "win32",
+          windowsPathExtensions,
+        })
+      ) {
         return classify(candidatePath);
       }
     }
@@ -217,16 +170,9 @@ function quoteWindowsBatchArgument(argument: string): string {
   }
 
   const escaped = argument
-    .replaceAll("^", "^^")
     .replaceAll("%", "%%")
-    .replaceAll("!", "^!")
-    .replaceAll("&", "^&")
-    .replaceAll("|", "^|")
-    .replaceAll("<", "^<")
-    .replaceAll(">", "^>")
-    .replaceAll("(", "^(")
-    .replaceAll(")", "^)")
-    .replaceAll('"', '""');
+    .replace(/(\\*)"/g, (_match, slashes: string) => `${slashes}${slashes}\\"`)
+    .replace(/(\\+)$/g, "$1$1");
   return `"${escaped}"`;
 }
 
@@ -266,7 +212,7 @@ export function resolveProcessLaunchPlan(
   }
 
   const env = resolveEffectiveEnvironment(options);
-  const resolved = resolveWindowsCommand(command, env);
+  const resolved = resolveWindowsCommand(command, env, options.cwd);
   if (!resolved) {
     return {
       command,
@@ -306,19 +252,14 @@ function toSpawnOptions(
   };
 }
 
-export function toRuntimeCommandOptions(
+function toRuntimeCommandOptions(
   options: RuntimeCommandOptions = {},
+  shell: boolean | string,
 ): ChildProcess.CommandOptions {
-  const launchPlan = resolveProcessLaunchPlan("", [], {
-    env: options.env,
-    runtimeEnvironment: options.runtimeEnvironment,
-    shell: options.shell,
-    inheritParentEnv: options.extendEnv !== false,
-  });
-
+  const { runtimeEnvironment: _runtimeEnvironment, shell: _shell, ...commandOptions } = options;
   return {
-    ...options,
-    shell: launchPlan.shell,
+    ...commandOptions,
+    shell,
   };
 }
 
@@ -328,18 +269,18 @@ export function makeRuntimeCommand(
   options: RuntimeCommandOptions = {},
 ): ChildProcess.StandardCommand {
   const launchPlan = resolveProcessLaunchPlan(command, args, {
+    cwd: options.cwd,
     env: options.env,
     runtimeEnvironment: options.runtimeEnvironment,
     shell: options.shell,
     inheritParentEnv: options.extendEnv !== false,
   });
   return ChildProcess.make(launchPlan.command, launchPlan.args, {
-    ...toRuntimeCommandOptions(options),
-    shell: launchPlan.shell,
+    ...toRuntimeCommandOptions(options, launchPlan.shell),
   });
 }
 
-export interface ManagedChildProcess {
+interface ManagedChildProcess {
   readonly scope: Scope.Closeable;
   readonly handle: ChildProcessSpawner.ChildProcessHandle;
 }
@@ -365,6 +306,7 @@ function spawnProcess(
   options: ProcessSpawnOptions = {},
 ): ChildProcessHandle {
   const launchPlan = resolveProcessLaunchPlan(command, args, {
+    cwd: options.cwd,
     env: options.env,
     runtimeEnvironment: options.runtimeEnvironment,
     shell: options.shell,
@@ -374,7 +316,7 @@ function spawnProcess(
   return spawn(launchPlan.command, launchPlan.args, toSpawnOptions(options, launchPlan));
 }
 
-export function spawnPipedProcess(
+function spawnPipedProcess(
   command: string,
   args: readonly string[],
   options: Omit<ProcessSpawnOptions, "stdio" | "detached"> = {},
@@ -391,6 +333,7 @@ export function spawnProcessSync(
   options: ProcessSpawnSyncOptions = {},
 ) {
   const launchPlan = resolveProcessLaunchPlan(command, args, {
+    cwd: options.cwd,
     env: options.env,
     runtimeEnvironment: options.runtimeEnvironment,
     shell: options.shell,
@@ -499,7 +442,7 @@ const DEFAULT_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
  * terminates the wrapper, leaving the actual command running. Use
  * `taskkill /T` to kill the entire process tree instead.
  */
-export function killProcessTree(
+function killProcessTree(
   child: ChildProcessHandle,
   options: {
     runtimeEnvironment?: ServerRuntimeEnvironment | undefined;

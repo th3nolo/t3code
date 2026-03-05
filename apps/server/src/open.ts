@@ -6,11 +6,17 @@
  *
  * @module Open
  */
-import { accessSync, constants, statSync } from "node:fs";
-import { extname, join } from "node:path";
+import { join } from "node:path";
 
 import { EDITORS, type EditorId, type ServerRuntimeEnvironment } from "@t3tools/contracts";
 import { ServiceMap, Schema, Effect, Layer } from "effect";
+import {
+  isExecutableFile,
+  resolveCommandCandidates,
+  resolvePathEnvironmentVariable,
+  resolveWindowsPathExtensions,
+  stripWrappingQuotes,
+} from "./commandResolution";
 import { spawnDetachedProcess, spawnProcessSync } from "./processRunner";
 import { detectServerRuntimeEnvironment } from "./runtimeEnvironment";
 
@@ -72,75 +78,6 @@ function fileManagerCommandForPlatform(platform: NodeJS.Platform): string {
   }
 }
 
-function stripWrappingQuotes(value: string): string {
-  return value.replace(/^"+|"+$/g, "");
-}
-
-function resolvePathEnvironmentVariable(env: NodeJS.ProcessEnv): string {
-  return env.PATH ?? env.Path ?? env.path ?? "";
-}
-
-function resolveWindowsPathExtensions(env: NodeJS.ProcessEnv): ReadonlyArray<string> {
-  const rawValue = env.PATHEXT;
-  const fallback = [".COM", ".EXE", ".BAT", ".CMD"];
-  if (!rawValue) return fallback;
-
-  const parsed = rawValue
-    .split(";")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0)
-    .map((entry) => (entry.startsWith(".") ? entry.toUpperCase() : `.${entry.toUpperCase()}`));
-  return parsed.length > 0 ? Array.from(new Set(parsed)) : fallback;
-}
-
-function resolveCommandCandidates(
-  command: string,
-  platform: NodeJS.Platform,
-  windowsPathExtensions: ReadonlyArray<string>,
-): ReadonlyArray<string> {
-  if (platform !== "win32") return [command];
-  const extension = extname(command);
-  const normalizedExtension = extension.toUpperCase();
-
-  if (extension.length > 0 && windowsPathExtensions.includes(normalizedExtension)) {
-    const commandWithoutExtension = command.slice(0, -extension.length);
-    return Array.from(
-      new Set([
-        command,
-        `${commandWithoutExtension}${normalizedExtension}`,
-        `${commandWithoutExtension}${normalizedExtension.toLowerCase()}`,
-      ]),
-    );
-  }
-
-  const candidates: string[] = [];
-  for (const extension of windowsPathExtensions) {
-    candidates.push(`${command}${extension}`);
-    candidates.push(`${command}${extension.toLowerCase()}`);
-  }
-  return Array.from(new Set(candidates));
-}
-
-function isExecutableFile(
-  filePath: string,
-  platform: NodeJS.Platform,
-  windowsPathExtensions: ReadonlyArray<string>,
-): boolean {
-  try {
-    const stat = statSync(filePath);
-    if (!stat.isFile()) return false;
-    if (platform === "win32") {
-      const extension = extname(filePath);
-      if (extension.length === 0) return false;
-      return windowsPathExtensions.includes(extension.toUpperCase());
-    }
-    accessSync(filePath, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function resolvePathDelimiter(platform: NodeJS.Platform): string {
   return platform === "win32" ? ";" : ":";
 }
@@ -156,7 +93,7 @@ export function isCommandAvailable(
 
   if (command.includes("/") || command.includes("\\")) {
     return commandCandidates.some((candidate) =>
-      isExecutableFile(candidate, platform, windowsPathExtensions),
+      isExecutableFile(candidate, { platform, windowsPathExtensions }),
     );
   }
 
@@ -169,7 +106,7 @@ export function isCommandAvailable(
 
   for (const pathEntry of pathEntries) {
     for (const candidate of commandCandidates) {
-      if (isExecutableFile(join(pathEntry, candidate), platform, windowsPathExtensions)) {
+      if (isExecutableFile(join(pathEntry, candidate), { platform, windowsPathExtensions })) {
         return true;
       }
     }

@@ -179,6 +179,13 @@ describe("messageFromCodexProcessCause", () => {
   });
 });
 
+describe("constructor", () => {
+  it("supports the optional no-services path without unsafe casting", () => {
+    const manager = new CodexAppServerManager();
+    expect(() => manager.stopAll()).not.toThrow();
+  });
+});
+
 describe("startSession", () => {
   it("emits session/startFailed when resolving cwd throws before process launch", async () => {
     const manager = createManager();

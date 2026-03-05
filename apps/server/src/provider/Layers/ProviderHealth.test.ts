@@ -11,6 +11,7 @@ function mockRunner(
     stdout: string;
     stderr: string;
     code: number | null;
+    signal?: NodeJS.Signals | null;
     timedOut?: boolean;
   },
 ) {
@@ -146,6 +147,27 @@ it("parseAuthStatusFromOutput: timed out auth check is warning", () => {
   assert.strictEqual(parsed.authStatus, "unknown");
   assert.strictEqual(parsed.message, "Timed out while checking Codex authentication status.");
 });
+
+it.effect("reports signal-based auth probe failures without 'code null'", () =>
+  Effect.gen(function* () {
+    const status = yield* checkCodexProviderStatus(
+      mockRunner((args) => {
+        const joined = args.join(" ");
+        if (joined === "--version") return { stdout: "codex 1.0.0\n", stderr: "", code: 0 };
+        if (joined === "login status") {
+          return { stdout: "", stderr: "", code: null, signal: "SIGTERM" };
+        }
+        throw new Error(`Unexpected args: ${joined}`);
+      }),
+    );
+    assert.strictEqual(status.status, "warning");
+    assert.strictEqual(status.authStatus, "unknown");
+    assert.strictEqual(
+      status.message,
+      "Could not verify Codex authentication status. Command exited from signal SIGTERM.",
+    );
+  }),
+);
 
 // ── Pure function tests ─────────────────────────────────────────────
 

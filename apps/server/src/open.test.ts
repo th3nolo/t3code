@@ -1,8 +1,9 @@
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { assert, describe, it } from "@effect/vitest";
+import { describe, expect, it } from "vitest";
 
 import {
   isCommandAvailable,
@@ -12,117 +13,130 @@ import {
   resolveEditorLaunch,
 } from "./open";
 import { Effect } from "effect";
-import { assertSuccess } from "@effect/vitest/utils";
 
 describe("resolveEditorLaunch", () => {
-  it.effect("returns commands for command-based editors", () =>
-    Effect.gen(function* () {
-      const cursorLaunch = yield* resolveEditorLaunch(
+  it("returns commands for command-based editors", async () => {
+    const cursorLaunch = await Effect.runPromise(
+      resolveEditorLaunch(
         { cwd: "/tmp/workspace", editor: "cursor" },
         { platform: "darwin" },
-      );
-      assert.deepEqual(cursorLaunch, {
-        command: "cursor",
-        args: ["/tmp/workspace"],
-      });
+      ),
+    );
+    assert.deepEqual(cursorLaunch, {
+      command: "cursor",
+      args: ["/tmp/workspace"],
+    });
 
-      const vscodeLaunch = yield* resolveEditorLaunch(
+    const vscodeLaunch = await Effect.runPromise(
+      resolveEditorLaunch(
         { cwd: "/tmp/workspace", editor: "vscode" },
         { platform: "darwin" },
-      );
-      assert.deepEqual(vscodeLaunch, {
-        command: "code",
-        args: ["/tmp/workspace"],
-      });
+      ),
+    );
+    assert.deepEqual(vscodeLaunch, {
+      command: "code",
+      args: ["/tmp/workspace"],
+    });
 
-      const zedLaunch = yield* resolveEditorLaunch(
+    const zedLaunch = await Effect.runPromise(
+      resolveEditorLaunch(
         { cwd: "/tmp/workspace", editor: "zed" },
         { platform: "darwin" },
-      );
-      assert.deepEqual(zedLaunch, {
-        command: "zed",
-        args: ["/tmp/workspace"],
-      });
-    }),
-  );
+      ),
+    );
+    assert.deepEqual(zedLaunch, {
+      command: "zed",
+      args: ["/tmp/workspace"],
+    });
+  });
 
-  it.effect("uses --goto when editor supports line/column suffixes", () =>
-    Effect.gen(function* () {
-      const lineOnly = yield* resolveEditorLaunch(
+  it("uses --goto when editor supports line/column suffixes", async () => {
+    const lineOnly = await Effect.runPromise(
+      resolveEditorLaunch(
         { cwd: "/tmp/workspace/AGENTS.md:48", editor: "cursor" },
         { platform: "darwin" },
-      );
-      assert.deepEqual(lineOnly, {
-        command: "cursor",
-        args: ["--goto", "/tmp/workspace/AGENTS.md:48"],
-      });
+      ),
+    );
+    assert.deepEqual(lineOnly, {
+      command: "cursor",
+      args: ["--goto", "/tmp/workspace/AGENTS.md:48"],
+    });
 
-      const lineAndColumn = yield* resolveEditorLaunch(
+    const lineAndColumn = await Effect.runPromise(
+      resolveEditorLaunch(
         { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "cursor" },
         { platform: "darwin" },
-      );
-      assert.deepEqual(lineAndColumn, {
-        command: "cursor",
-        args: ["--goto", "/tmp/workspace/src/open.ts:71:5"],
-      });
+      ),
+    );
+    assert.deepEqual(lineAndColumn, {
+      command: "cursor",
+      args: ["--goto", "/tmp/workspace/src/open.ts:71:5"],
+    });
 
-      const vscodeLineAndColumn = yield* resolveEditorLaunch(
+    const vscodeLineAndColumn = await Effect.runPromise(
+      resolveEditorLaunch(
         { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "vscode" },
         { platform: "darwin" },
-      );
-      assert.deepEqual(vscodeLineAndColumn, {
-        command: "code",
-        args: ["--goto", "/tmp/workspace/src/open.ts:71:5"],
-      });
+      ),
+    );
+    assert.deepEqual(vscodeLineAndColumn, {
+      command: "code",
+      args: ["--goto", "/tmp/workspace/src/open.ts:71:5"],
+    });
 
-      const zedLineAndColumn = yield* resolveEditorLaunch(
+    const zedLineAndColumn = await Effect.runPromise(
+      resolveEditorLaunch(
         { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "zed" },
         { platform: "darwin" },
-      );
-      assert.deepEqual(zedLineAndColumn, {
-        command: "zed",
-        args: ["/tmp/workspace/src/open.ts:71:5"],
-      });
-    }),
-  );
+      ),
+    );
+    assert.deepEqual(zedLineAndColumn, {
+      command: "zed",
+      args: ["/tmp/workspace/src/open.ts:71:5"],
+    });
+  });
 
-  it.effect("maps file-manager editor to OS open commands", () =>
-    Effect.gen(function* () {
-      const launch1 = yield* resolveEditorLaunch(
+  it("maps file-manager editor to OS open commands", async () => {
+    const launch1 = await Effect.runPromise(
+      resolveEditorLaunch(
         { cwd: "/tmp/workspace", editor: "file-manager" },
         { platform: "darwin" },
-      );
-      assert.deepEqual(launch1, {
-        command: "open",
-        args: ["/tmp/workspace"],
-      });
+      ),
+    );
+    assert.deepEqual(launch1, {
+      command: "open",
+      args: ["/tmp/workspace"],
+    });
 
-      const launch2 = yield* resolveEditorLaunch(
+    const launch2 = await Effect.runPromise(
+      resolveEditorLaunch(
         { cwd: "C:\\workspace", editor: "file-manager" },
         { platform: "win32" },
-      );
-      assert.deepEqual(launch2, {
-        command: "explorer",
-        args: ["C:\\workspace"],
-      });
+      ),
+    );
+    assert.deepEqual(launch2, {
+      command: "explorer",
+      args: ["C:\\workspace"],
+    });
 
-      const launch3 = yield* resolveEditorLaunch(
+    const launch3 = await Effect.runPromise(
+      resolveEditorLaunch(
         { cwd: "/tmp/workspace", editor: "file-manager" },
         { platform: "linux" },
-      );
-      assert.deepEqual(launch3, {
-        command: "xdg-open",
-        args: ["/tmp/workspace"],
-      });
-    }),
-  );
+      ),
+    );
+    assert.deepEqual(launch3, {
+      command: "xdg-open",
+      args: ["/tmp/workspace"],
+    });
+  });
 
-  it.effect("prefers linux editor shims in wsl-hosted mode when available", () =>
-    Effect.gen(function* () {
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-open-wsl-linux-editor-"));
-      try {
-        fs.writeFileSync(path.join(dir, "code"), "#!/bin/sh\n", { mode: 0o755 });
-        const launch = yield* resolveEditorLaunch(
+  it("prefers linux editor shims in wsl-hosted mode when available", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-open-wsl-linux-editor-"));
+    try {
+      fs.writeFileSync(path.join(dir, "code"), "#!/bin/sh\n", { mode: 0o755 });
+      const launch = await Effect.runPromise(
+        resolveEditorLaunch(
           { cwd: "/home/julius/project/src/open.ts:71:5", editor: "vscode" },
           {
             platform: "linux",
@@ -137,23 +151,23 @@ describe("resolveEditorLaunch", () => {
               PATH: dir,
             },
           },
-        );
-        assert.deepEqual(launch, {
-          command: "code",
-          args: ["--goto", "/home/julius/project/src/open.ts:71:5"],
-        });
-      } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
-      }
-    }),
-  );
+        ),
+      );
+      assert.deepEqual(launch, {
+        command: "code",
+        args: ["--goto", "/home/julius/project/src/open.ts:71:5"],
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
-  it.effect("falls back to windows editor executables in wsl-hosted mode", () =>
-    Effect.gen(function* () {
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-open-wsl-win-editor-"));
-      try {
-        fs.writeFileSync(path.join(dir, "code.exe"), "MZ", { mode: 0o755 });
-        const launch = yield* resolveEditorLaunch(
+  it("falls back to windows editor executables in wsl-hosted mode", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-open-wsl-win-editor-"));
+    try {
+      fs.writeFileSync(path.join(dir, "code.exe"), "MZ", { mode: 0o755 });
+      const launch = await Effect.runPromise(
+        resolveEditorLaunch(
           { cwd: "/home/julius/project/src/open.ts:71:5", editor: "vscode" },
           {
             platform: "linux",
@@ -173,26 +187,26 @@ describe("resolveEditorLaunch", () => {
                 "\\\\wsl.localhost\\Ubuntu\\home\\julius\\project",
               ),
           },
-        );
-        assert.deepEqual(launch, {
-          command: "code.exe",
-          args: [
-            "--goto",
-            "\\\\wsl.localhost\\Ubuntu\\home\\julius\\project/src/open.ts:71:5",
-          ],
-        });
-      } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
-      }
-    }),
-  );
+        ),
+      );
+      assert.deepEqual(launch, {
+        command: "code.exe",
+        args: [
+          "--goto",
+          "\\\\wsl.localhost\\Ubuntu\\home\\julius\\project/src/open.ts:71:5",
+        ],
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
-  it.effect("translates file-manager targets for wsl-hosted mode", () =>
-    Effect.gen(function* () {
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-open-wsl-file-manager-"));
-      try {
-        fs.writeFileSync(path.join(dir, "explorer.exe"), "MZ", { mode: 0o755 });
-        const launch = yield* resolveEditorLaunch(
+  it("translates file-manager targets for wsl-hosted mode", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-open-wsl-file-manager-"));
+    try {
+      fs.writeFileSync(path.join(dir, "explorer.exe"), "MZ", { mode: 0o755 });
+      const launch = await Effect.runPromise(
+        resolveEditorLaunch(
           { cwd: "/home/julius/project/src/open.ts:71:5", editor: "file-manager" },
           {
             platform: "linux",
@@ -212,38 +226,39 @@ describe("resolveEditorLaunch", () => {
                 "\\\\wsl.localhost\\Ubuntu\\home\\julius\\project",
               ),
           },
-        );
-        assert.deepEqual(launch, {
-          command: "explorer.exe",
-          args: ["\\\\wsl.localhost\\Ubuntu\\home\\julius\\project/src/open.ts"],
-        });
-      } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
-      }
-    }),
-  );
+        ),
+      );
+      assert.deepEqual(launch, {
+        command: "explorer.exe",
+        args: ["\\\\wsl.localhost\\Ubuntu\\home\\julius\\project/src/open.ts"],
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("launchDetached", () => {
-  it.effect("resolves when command can be spawned", () =>
-    Effect.gen(function* () {
-      const result = yield* launchDetached({
-        command: process.execPath,
-        args: ["-e", "process.exit(0)"],
-      }).pipe(Effect.result);
-      assertSuccess(result, undefined);
-    }),
-  );
+  it("resolves when command can be spawned", async () => {
+    await expect(
+      Effect.runPromise(
+        launchDetached({
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+        }),
+      ),
+    ).resolves.toBeUndefined();
+  });
 
-  it.effect("rejects when command does not exist", () =>
-    Effect.gen(function* () {
-      const result = yield* launchDetached({
+  it("rejects when command does not exist", async () => {
+    const result = await Effect.runPromise(
+      launchDetached({
         command: `t3code-no-such-command-${Date.now()}`,
         args: [],
-      }).pipe(Effect.result);
-      assert.equal(result._tag, "Failure");
-    }),
-  );
+      }).pipe(Effect.result),
+    );
+    assert.equal(result._tag, "Failure");
+  });
 });
 
 describe("isCommandAvailable", () => {
