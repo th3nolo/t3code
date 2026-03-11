@@ -2,11 +2,15 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  CommandId,
   GitCommandError,
   KeybindingRule,
   OpenError,
+  ORCHESTRATION_WS_METHODS,
+  ProjectId,
   ResolvedKeybindingRule,
   TerminalError,
+  ThreadId,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -20,12 +24,69 @@ import type { ServerConfigShape } from "./config.ts";
 import { ServerConfig } from "./config.ts";
 import { makeRoutesLayer } from "./server.ts";
 import { resolveAttachmentRelativePath } from "./attachmentPaths.ts";
+import {
+  CheckpointDiffQuery,
+  type CheckpointDiffQueryShape,
+} from "./checkpointing/Services/CheckpointDiffQuery.ts";
 import { GitCore, type GitCoreShape } from "./git/Services/GitCore.ts";
 import { GitManager, type GitManagerShape } from "./git/Services/GitManager.ts";
 import { Keybindings, KeybindingsConfigError, type KeybindingsShape } from "./keybindings.ts";
 import { Open, type OpenShape } from "./open.ts";
+import {
+  OrchestrationEngineService,
+  type OrchestrationEngineShape,
+} from "./orchestration/Services/OrchestrationEngine.ts";
+import {
+  ProjectionSnapshotQuery,
+  type ProjectionSnapshotQueryShape,
+} from "./orchestration/Services/ProjectionSnapshotQuery.ts";
+import { PersistenceSqlError } from "./persistence/Errors.ts";
 import { ProviderHealth, type ProviderHealthShape } from "./provider/Services/ProviderHealth.ts";
 import { TerminalManager, type TerminalManagerShape } from "./terminal/Services/Manager.ts";
+
+const defaultProjectId = ProjectId.makeUnsafe("project-default");
+const defaultThreadId = ThreadId.makeUnsafe("thread-default");
+
+const makeDefaultOrchestrationReadModel = () => {
+  const now = new Date().toISOString();
+  return {
+    snapshotSequence: 0,
+    updatedAt: now,
+    projects: [
+      {
+        id: defaultProjectId,
+        title: "Default Project",
+        workspaceRoot: "/tmp/default-project",
+        defaultModel: "gpt-5-codex",
+        scripts: [],
+        createdAt: now,
+        updatedAt: now,
+        deletedAt: null,
+      },
+    ],
+    threads: [
+      {
+        id: defaultThreadId,
+        projectId: defaultProjectId,
+        title: "Default Thread",
+        model: "gpt-5-codex",
+        interactionMode: "default" as const,
+        runtimeMode: "full-access" as const,
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+        updatedAt: now,
+        latestTurn: null,
+        messages: [],
+        session: null,
+        activities: [],
+        proposedPlans: [],
+        checkpoints: [],
+        deletedAt: null,
+      },
+    ],
+  };
+};
 
 const buildAppUnderTest = (options?: {
   config?: Partial<ServerConfigShape>;
@@ -36,6 +97,9 @@ const buildAppUnderTest = (options?: {
     gitCore?: Partial<GitCoreShape>;
     gitManager?: Partial<GitManagerShape>;
     terminalManager?: Partial<TerminalManagerShape>;
+    orchestrationEngine?: Partial<OrchestrationEngineShape>;
+    projectionSnapshotQuery?: Partial<ProjectionSnapshotQueryShape>;
+    checkpointDiffQuery?: Partial<CheckpointDiffQueryShape>;
   };
 }) =>
   Effect.gen(function* () {
@@ -93,6 +157,40 @@ const buildAppUnderTest = (options?: {
       Layer.provide(
         Layer.mock(TerminalManager)({
           ...options?.layers?.terminalManager,
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(OrchestrationEngineService)({
+          getReadModel: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
+          readEvents: () => Stream.empty,
+          dispatch: () => Effect.succeed({ sequence: 0 }),
+          streamDomainEvents: Stream.empty,
+          ...options?.layers?.orchestrationEngine,
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(ProjectionSnapshotQuery)({
+          getSnapshot: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
+          ...options?.layers?.projectionSnapshotQuery,
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(CheckpointDiffQuery)({
+          getTurnDiff: () =>
+            Effect.succeed({
+              threadId: defaultThreadId,
+              fromTurnCount: 0,
+              toTurnCount: 0,
+              diff: "",
+            }),
+          getFullThreadDiff: () =>
+            Effect.succeed({
+              threadId: defaultThreadId,
+              fromTurnCount: 0,
+              toTurnCount: 0,
+              diff: "",
+            }),
+          ...options?.layers?.checkpointDiffQuery,
         }),
       ),
       Layer.provide(layerConfig),
@@ -651,6 +749,154 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assertFailure(result, gitError);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes websocket rpc orchestration methods", () =>
+    Effect.gen(function* () {
+      const now = new Date().toISOString();
+      const snapshot = {
+        snapshotSequence: 1,
+        updatedAt: now,
+        projects: [
+          {
+            id: ProjectId.makeUnsafe("project-a"),
+            title: "Project A",
+            workspaceRoot: "/tmp/project-a",
+            defaultModel: "gpt-5-codex",
+            scripts: [],
+            createdAt: now,
+            updatedAt: now,
+            deletedAt: null,
+          },
+        ],
+        threads: [
+          {
+            id: ThreadId.makeUnsafe("thread-1"),
+            projectId: ProjectId.makeUnsafe("project-a"),
+            title: "Thread A",
+            model: "gpt-5-codex",
+            interactionMode: "default" as const,
+            runtimeMode: "full-access" as const,
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+            latestTurn: null,
+            messages: [],
+            session: null,
+            activities: [],
+            proposedPlans: [],
+            checkpoints: [],
+            deletedAt: null,
+          },
+        ],
+      };
+
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getSnapshot: () => Effect.succeed(snapshot),
+          },
+          orchestrationEngine: {
+            dispatch: () => Effect.succeed({ sequence: 7 }),
+            readEvents: () => Stream.empty,
+          },
+          checkpointDiffQuery: {
+            getTurnDiff: () =>
+              Effect.succeed({
+                threadId: ThreadId.makeUnsafe("thread-1"),
+                fromTurnCount: 0,
+                toTurnCount: 1,
+                diff: "turn-diff",
+              }),
+            getFullThreadDiff: () =>
+              Effect.succeed({
+                threadId: ThreadId.makeUnsafe("thread-1"),
+                fromTurnCount: 0,
+                toTurnCount: 1,
+                diff: "full-diff",
+              }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const snapshotResult = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[ORCHESTRATION_WS_METHODS.getSnapshot]({})),
+      );
+      assert.equal(snapshotResult.snapshotSequence, 1);
+
+      const dispatchResult = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+            type: "thread.session.stop",
+            commandId: CommandId.makeUnsafe("cmd-1"),
+            threadId: ThreadId.makeUnsafe("thread-1"),
+            createdAt: now,
+          }),
+        ),
+      );
+      assert.equal(dispatchResult.sequence, 7);
+
+      const turnDiffResult = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.getTurnDiff]({
+            threadId: ThreadId.makeUnsafe("thread-1"),
+            fromTurnCount: 0,
+            toTurnCount: 1,
+          }),
+        ),
+      );
+      assert.equal(turnDiffResult.diff, "turn-diff");
+
+      const fullDiffResult = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.getFullThreadDiff]({
+            threadId: ThreadId.makeUnsafe("thread-1"),
+            toTurnCount: 1,
+          }),
+        ),
+      );
+      assert.equal(fullDiffResult.diff, "full-diff");
+
+      const replayResult = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.replayEvents]({
+            fromSequenceExclusive: 0,
+          }),
+        ),
+      );
+      assert.deepEqual(replayResult, []);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes websocket rpc orchestration.getSnapshot errors", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getSnapshot: () =>
+              Effect.fail(
+                new PersistenceSqlError({
+                  operation: "ProjectionSnapshotQuery.getSnapshot",
+                  detail: "projection unavailable",
+                }),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[ORCHESTRATION_WS_METHODS.getSnapshot]({})).pipe(
+          Effect.result,
+        ),
+      );
+
+      assertTrue(result._tag === "Failure");
+      assertTrue(result.failure._tag === "OrchestrationGetSnapshotError");
+      assertInclude(result.failure.message, "Failed to load orchestration snapshot");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

@@ -26,6 +26,20 @@ import {
 } from "./git";
 import { KeybindingsConfigError } from "./keybindings";
 import {
+  ClientOrchestrationCommand,
+  ORCHESTRATION_WS_METHODS,
+  OrchestrationDispatchCommandError,
+  OrchestrationGetFullThreadDiffError,
+  OrchestrationGetFullThreadDiffInput,
+  OrchestrationGetSnapshotError,
+  OrchestrationGetSnapshotInput,
+  OrchestrationGetTurnDiffError,
+  OrchestrationGetTurnDiffInput,
+  OrchestrationReplayEventsError,
+  OrchestrationReplayEventsInput,
+  OrchestrationRpcSchemas,
+} from "./orchestration";
+import {
   ProjectSearchEntriesError,
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
@@ -168,6 +182,42 @@ export const WsTerminalCloseRpc = Rpc.make(WS_METHODS.terminalClose, {
   error: TerminalError,
 });
 
+export const WsOrchestrationGetSnapshotRpc = Rpc.make(ORCHESTRATION_WS_METHODS.getSnapshot, {
+  payload: OrchestrationGetSnapshotInput,
+  success: OrchestrationRpcSchemas.getSnapshot.output,
+  error: OrchestrationGetSnapshotError,
+});
+
+export const WsOrchestrationDispatchCommandRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.dispatchCommand,
+  {
+    payload: ClientOrchestrationCommand,
+    success: OrchestrationRpcSchemas.dispatchCommand.output,
+    error: OrchestrationDispatchCommandError,
+  },
+);
+
+export const WsOrchestrationGetTurnDiffRpc = Rpc.make(ORCHESTRATION_WS_METHODS.getTurnDiff, {
+  payload: OrchestrationGetTurnDiffInput,
+  success: OrchestrationRpcSchemas.getTurnDiff.output,
+  error: OrchestrationGetTurnDiffError,
+});
+
+export const WsOrchestrationGetFullThreadDiffRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.getFullThreadDiff,
+  {
+    payload: OrchestrationGetFullThreadDiffInput,
+    success: OrchestrationRpcSchemas.getFullThreadDiff.output,
+    error: OrchestrationGetFullThreadDiffError,
+  },
+);
+
+export const WsOrchestrationReplayEventsRpc = Rpc.make(ORCHESTRATION_WS_METHODS.replayEvents, {
+  payload: OrchestrationReplayEventsInput,
+  success: OrchestrationRpcSchemas.replayEvents.output,
+  error: OrchestrationReplayEventsError,
+});
+
 export const WsRpcGroup = RpcGroup.make(
   WsServerGetConfigRpc,
   WsServerUpsertKeybindingRpc,
@@ -191,4 +241,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsTerminalClearRpc,
   WsTerminalRestartRpc,
   WsTerminalCloseRpc,
+  WsOrchestrationGetSnapshotRpc,
+  WsOrchestrationDispatchCommandRpc,
+  WsOrchestrationGetTurnDiffRpc,
+  WsOrchestrationGetFullThreadDiffRpc,
+  WsOrchestrationReplayEventsRpc,
 );

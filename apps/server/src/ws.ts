@@ -1,22 +1,104 @@
-import { Effect, FileSystem, Layer, Path } from "effect";
+import { Effect, FileSystem, Layer, Path, Schema, Stream } from "effect";
 import {
+  OrchestrationDispatchCommandError,
+  OrchestrationGetFullThreadDiffError,
+  OrchestrationGetSnapshotError,
+  OrchestrationGetTurnDiffError,
+  ORCHESTRATION_WS_METHODS,
   ProjectSearchEntriesError,
   ProjectWriteFileError,
+  OrchestrationReplayEventsError,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
+import { clamp } from "effect/Number";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
+import { CheckpointDiffQuery } from "./checkpointing/Services/CheckpointDiffQuery";
 import { ServerConfig } from "./config";
 import { GitCore } from "./git/Services/GitCore";
 import { GitManager } from "./git/Services/GitManager";
 import { Keybindings } from "./keybindings";
 import { Open, resolveAvailableEditors } from "./open";
+import { normalizeDispatchCommand } from "./orchestration/Normalizer";
+import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine";
+import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery";
 import { ProviderHealth } from "./provider/Services/ProviderHealth";
 import { TerminalManager } from "./terminal/Services/Manager";
 import { resolveWorkspaceWritePath, searchWorkspaceEntries } from "./workspaceEntries";
 
 const WsRpcLayer = WsRpcGroup.toLayer({
+  [ORCHESTRATION_WS_METHODS.getSnapshot]: (_input) =>
+    Effect.gen(function* () {
+      const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+      return yield* projectionSnapshotQuery.getSnapshot();
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new OrchestrationGetSnapshotError({
+            message: "Failed to load orchestration snapshot",
+            cause,
+          }),
+      ),
+    ),
+  [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
+    Effect.gen(function* () {
+      const orchestrationEngine = yield* OrchestrationEngineService;
+      const normalizedCommand = yield* normalizeDispatchCommand(command);
+      return yield* orchestrationEngine.dispatch(normalizedCommand);
+    }).pipe(
+      Effect.mapError((cause) =>
+        Schema.is(OrchestrationDispatchCommandError)(cause)
+          ? cause
+          : new OrchestrationDispatchCommandError({
+              message: "Failed to dispatch orchestration command",
+              cause,
+            }),
+      ),
+    ),
+  [ORCHESTRATION_WS_METHODS.getTurnDiff]: (input) =>
+    Effect.gen(function* () {
+      const checkpointDiffQuery = yield* CheckpointDiffQuery;
+      return yield* checkpointDiffQuery.getTurnDiff(input);
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new OrchestrationGetTurnDiffError({
+            message: "Failed to load turn diff",
+            cause,
+          }),
+      ),
+    ),
+  [ORCHESTRATION_WS_METHODS.getFullThreadDiff]: (input) =>
+    Effect.gen(function* () {
+      const checkpointDiffQuery = yield* CheckpointDiffQuery;
+      return yield* checkpointDiffQuery.getFullThreadDiff(input);
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new OrchestrationGetFullThreadDiffError({
+            message: "Failed to load full thread diff",
+            cause,
+          }),
+      ),
+    ),
+  [ORCHESTRATION_WS_METHODS.replayEvents]: (input) =>
+    Effect.gen(function* () {
+      const orchestrationEngine = yield* OrchestrationEngineService;
+      return yield* Stream.runCollect(
+        orchestrationEngine.readEvents(
+          clamp(input.fromSequenceExclusive, { maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+        ),
+      ).pipe(Effect.map((events) => Array.from(events)));
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new OrchestrationReplayEventsError({
+            message: "Failed to replay orchestration events",
+            cause,
+          }),
+      ),
+    ),
   [WS_METHODS.serverGetConfig]: () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig;

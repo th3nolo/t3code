@@ -65,11 +65,11 @@ Legend: `[x]` done, `[ ]` not started.
 
 ### Phase 5: Orchestration RPC methods (domain-critical path)
 
-- [ ] `orchestration.getSnapshot`
-- [ ] `orchestration.dispatchCommand`
-- [ ] `orchestration.getTurnDiff`
-- [ ] `orchestration.getFullThreadDiff`
-- [ ] `orchestration.replayEvents`
+- [x] `orchestration.getSnapshot`
+- [x] `orchestration.dispatchCommand`
+- [x] `orchestration.getTurnDiff`
+- [x] `orchestration.getFullThreadDiff`
+- [x] `orchestration.replayEvents`
 
 ## Notes
 
