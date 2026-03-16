@@ -1373,10 +1373,6 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             });
             return;
           }
-          const tool = context.inFlightTools.get(index);
-          if (!tool) {
-            return;
-          }
         }
       });
 
