@@ -5,8 +5,12 @@ import waitOn from "wait-on";
 
 import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
 
-const port = Number(process.env.ELECTRON_RENDERER_PORT ?? 5733);
-const devServerUrl = `http://localhost:${port}`;
+const rendererPort = Number(process.env.ELECTRON_RENDERER_PORT ?? 5733);
+const devServerUrl = process.env.VITE_DEV_SERVER_URL?.trim() || `http://localhost:${rendererPort}`;
+const parsedDevServerUrl = new URL(devServerUrl);
+const devServerPort = Number(
+  parsedDevServerUrl.port || (parsedDevServerUrl.protocol === "https:" ? 443 : 80),
+);
 const requiredFiles = [
   "dist-electron/main.js",
   "dist-electron/preload.js",
@@ -21,7 +25,7 @@ const restartDebounceMs = 120;
 const childTreeGracePeriodMs = 1_200;
 
 await waitOn({
-  resources: [`tcp:${port}`, ...requiredFiles.map((filePath) => `file:${filePath}`)],
+  resources: [`tcp:${devServerPort}`, ...requiredFiles.map((filePath) => `file:${filePath}`)],
 });
 
 const childEnv = { ...process.env };
