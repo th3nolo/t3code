@@ -13,6 +13,7 @@ const BASE_SERVER_PORT = 3773;
 const BASE_WEB_PORT = 5733;
 const MAX_HASH_OFFSET = 3000;
 const MAX_PORT = 65535;
+const DEFAULT_DEV_HOST = "127.0.0.1";
 
 export const DEFAULT_DEV_STATE_DIR = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(homedir(), ".t3", "dev"),
@@ -130,6 +131,21 @@ interface CreateDevRunnerEnvInput {
   readonly devUrl: URL | undefined;
 }
 
+const isWildcardHost = (host: string): boolean =>
+  host === "0.0.0.0" || host === "::" || host === "[::]";
+
+const formatHostForUrl = (host: string): string =>
+  host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+
+const resolveDevHost = (host: string | undefined): string => {
+  const trimmedHost = host?.trim();
+  if (!trimmedHost || trimmedHost === "localhost" || isWildcardHost(trimmedHost)) {
+    return DEFAULT_DEV_HOST;
+  }
+
+  return trimmedHost;
+};
+
 export function createDevRunnerEnv({
   mode,
   baseEnv,
@@ -148,14 +164,15 @@ export function createDevRunnerEnv({
     const serverPort = port ?? BASE_SERVER_PORT + serverOffset;
     const webPort = BASE_WEB_PORT + webOffset;
     const resolvedStateDir = yield* resolveStateDir(stateDir);
+    const webHost = resolveDevHost(host);
 
     const output: NodeJS.ProcessEnv = {
       ...baseEnv,
       T3CODE_PORT: String(serverPort),
       PORT: String(webPort),
       ELECTRON_RENDERER_PORT: String(webPort),
-      VITE_WS_URL: `ws://localhost:${serverPort}`,
-      VITE_DEV_SERVER_URL: devUrl?.toString() ?? `http://localhost:${webPort}`,
+      VITE_WS_URL: `ws://${formatHostForUrl(webHost)}:${serverPort}`,
+      VITE_DEV_SERVER_URL: devUrl?.toString() ?? `http://${formatHostForUrl(webHost)}:${webPort}`,
       T3CODE_STATE_DIR: resolvedStateDir,
     };
 
