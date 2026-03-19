@@ -6,8 +6,16 @@ import { defineConfig } from "vite";
 import pkg from "./package.json" with { type: "json" };
 
 const port = Number(process.env.PORT ?? 5733);
-const bindHost = process.env.T3CODE_WEB_BIND_HOST ?? "127.0.0.1";
-const connectHost = process.env.T3CODE_WEB_CONNECT_HOST ?? bindHost;
+const DEFAULT_DEV_HOST = "127.0.0.1";
+const isWildcardHost = (host: string): boolean =>
+  host === "0.0.0.0" || host === "::" || host === "[::]";
+const configuredHost = process.env.T3CODE_HOST?.trim();
+const resolvedHost = configuredHost === "[::]" ? "::" : configuredHost;
+const bindHost = resolvedHost && resolvedHost !== "localhost" ? resolvedHost : DEFAULT_DEV_HOST;
+const hmrHost =
+  !resolvedHost || resolvedHost === "localhost" || isWildcardHost(resolvedHost)
+    ? DEFAULT_DEV_HOST
+    : resolvedHost;
 const sourcemapEnv = process.env.T3CODE_WEB_SOURCEMAP?.trim().toLowerCase();
 
 const buildSourcemap =
@@ -51,7 +59,7 @@ export default defineConfig({
       // inside Electron's BrowserWindow. Vite 8 uses console.debug for
       // connection logs — enable "Verbose" in DevTools to see them.
       protocol: "ws",
-      host: connectHost,
+      host: hmrHost,
     },
   },
   build: {

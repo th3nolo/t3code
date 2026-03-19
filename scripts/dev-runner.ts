@@ -13,7 +13,7 @@ const BASE_SERVER_PORT = 3773;
 const BASE_WEB_PORT = 5733;
 const MAX_HASH_OFFSET = 3000;
 const MAX_PORT = 65535;
-const DEFAULT_DEV_CONNECT_HOST = "127.0.0.1";
+const DEFAULT_DEV_HOST = "127.0.0.1";
 
 export const DEFAULT_DEV_STATE_DIR = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(homedir(), ".t3", "dev"),
@@ -131,31 +131,19 @@ interface CreateDevRunnerEnvInput {
   readonly devUrl: URL | undefined;
 }
 
-const normalizeHost = (host: string | undefined): string | undefined => {
-  const normalizedHost = host?.trim();
-  if (!normalizedHost) {
-    return undefined;
-  }
-
-  if (normalizedHost.startsWith("[") && normalizedHost.endsWith("]")) {
-    return normalizedHost.slice(1, -1);
-  }
-
-  return normalizedHost;
-};
-
-const isWildcardHost = (host: string): boolean => host === "0.0.0.0" || host === "::";
+const isWildcardHost = (host: string): boolean =>
+  host === "0.0.0.0" || host === "::" || host === "[::]";
 
 const formatHostForUrl = (host: string): string =>
   host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 
-const resolveDevConnectHost = (host: string | undefined): string => {
-  const normalizedHost = normalizeHost(host);
-  if (!normalizedHost || normalizedHost === "localhost" || isWildcardHost(normalizedHost)) {
-    return DEFAULT_DEV_CONNECT_HOST;
+const resolveDevHost = (host: string | undefined): string => {
+  const trimmedHost = host?.trim();
+  if (!trimmedHost || trimmedHost === "localhost" || isWildcardHost(trimmedHost)) {
+    return DEFAULT_DEV_HOST;
   }
 
-  return normalizedHost;
+  return trimmedHost;
 };
 
 export function createDevRunnerEnv({
@@ -176,19 +164,15 @@ export function createDevRunnerEnv({
     const serverPort = port ?? BASE_SERVER_PORT + serverOffset;
     const webPort = BASE_WEB_PORT + webOffset;
     const resolvedStateDir = yield* resolveStateDir(stateDir);
-    const webBindHost = normalizeHost(host) ?? DEFAULT_DEV_CONNECT_HOST;
-    const webConnectHost = resolveDevConnectHost(host);
+    const webHost = resolveDevHost(host);
 
     const output: NodeJS.ProcessEnv = {
       ...baseEnv,
       T3CODE_PORT: String(serverPort),
       PORT: String(webPort),
       ELECTRON_RENDERER_PORT: String(webPort),
-      T3CODE_WEB_BIND_HOST: webBindHost,
-      T3CODE_WEB_CONNECT_HOST: webConnectHost,
-      VITE_WS_URL: `ws://${formatHostForUrl(webConnectHost)}:${serverPort}`,
-      VITE_DEV_SERVER_URL:
-        devUrl?.toString() ?? `http://${formatHostForUrl(webConnectHost)}:${webPort}`,
+      VITE_WS_URL: `ws://${formatHostForUrl(webHost)}:${serverPort}`,
+      VITE_DEV_SERVER_URL: devUrl?.toString() ?? `http://${formatHostForUrl(webHost)}:${webPort}`,
       T3CODE_STATE_DIR: resolvedStateDir,
     };
 

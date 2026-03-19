@@ -67,8 +67,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         ]);
 
         assert.equal(env.T3CODE_STATE_DIR, defaultStateDir);
-        assert.equal(env.T3CODE_WEB_BIND_HOST, "127.0.0.1");
-        assert.equal(env.T3CODE_WEB_CONNECT_HOST, "127.0.0.1");
         assert.equal(env.VITE_WS_URL, "ws://127.0.0.1:3773");
         assert.equal(env.VITE_DEV_SERVER_URL, "http://127.0.0.1:5733");
       }),
@@ -93,8 +91,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
 
         assert.equal(env.T3CODE_STATE_DIR, resolve("/tmp/override-state"));
         assert.equal(env.T3CODE_PORT, "4222");
-        assert.equal(env.T3CODE_WEB_BIND_HOST, "0.0.0.0");
-        assert.equal(env.T3CODE_WEB_CONNECT_HOST, "127.0.0.1");
         assert.equal(env.VITE_WS_URL, "ws://127.0.0.1:4222");
         assert.equal(env.T3CODE_NO_BROWSER, "1");
         assert.equal(env.T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD, "0");
@@ -104,7 +100,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       }),
     );
 
-    it.effect("formats IPv6 connect hosts only when building URLs", () =>
+    it.effect("formats IPv6 hosts correctly in dev URLs", () =>
       Effect.gen(function* () {
         const env = yield* createDevRunnerEnv({
           mode: "dev",
@@ -116,13 +112,11 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           noBrowser: undefined,
           autoBootstrapProjectFromCwd: undefined,
           logWebSocketEvents: undefined,
-          host: "[::1]",
+          host: "::1",
           port: 4222,
           devUrl: undefined,
         });
 
-        assert.equal(env.T3CODE_WEB_BIND_HOST, "::1");
-        assert.equal(env.T3CODE_WEB_CONNECT_HOST, "::1");
         assert.equal(env.VITE_WS_URL, "ws://[::1]:4222");
         assert.equal(env.VITE_DEV_SERVER_URL, "http://[::1]:5733");
       }),
