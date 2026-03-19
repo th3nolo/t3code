@@ -6,6 +6,7 @@ import { defineConfig } from "vite";
 import pkg from "./package.json" with { type: "json" };
 
 const port = Number(process.env.PORT ?? 5733);
+const host = process.env.HOST ?? "127.0.0.1";
 const sourcemapEnv = process.env.T3CODE_WEB_SOURCEMAP?.trim().toLowerCase();
 
 const buildSourcemap =
@@ -41,6 +42,7 @@ export default defineConfig({
     tsconfigPaths: true,
   },
   server: {
+    host,
     port,
     strictPort: true,
     hmr: {
@@ -48,7 +50,7 @@ export default defineConfig({
       // inside Electron's BrowserWindow. Vite 8 uses console.debug for
       // connection logs — enable "Verbose" in DevTools to see them.
       protocol: "ws",
-      host: "localhost",
+      host,
     },
   },
   build: {

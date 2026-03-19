@@ -147,6 +147,7 @@ export function createDevRunnerEnv({
   return Effect.gen(function* () {
     const serverPort = port ?? BASE_SERVER_PORT + serverOffset;
     const webPort = BASE_WEB_PORT + webOffset;
+    const urlHost = host ?? "localhost";
     const resolvedStateDir = yield* resolveStateDir(stateDir);
 
     const output: NodeJS.ProcessEnv = {
@@ -154,8 +155,8 @@ export function createDevRunnerEnv({
       T3CODE_PORT: String(serverPort),
       PORT: String(webPort),
       ELECTRON_RENDERER_PORT: String(webPort),
-      VITE_WS_URL: `ws://localhost:${serverPort}`,
-      VITE_DEV_SERVER_URL: devUrl?.toString() ?? `http://localhost:${webPort}`,
+      VITE_WS_URL: `ws://${urlHost}:${serverPort}`,
+      VITE_DEV_SERVER_URL: devUrl?.toString() ?? `http://${urlHost}:${webPort}`,
       T3CODE_STATE_DIR: resolvedStateDir,
     };
 
