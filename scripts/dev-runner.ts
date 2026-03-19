@@ -131,11 +131,26 @@ interface CreateDevRunnerEnvInput {
   readonly devUrl: URL | undefined;
 }
 
-const isWildcardHost = (host: string): boolean =>
-  host === "0.0.0.0" || host === "::" || host === "[::]";
+const normalizeHost = (host: string | undefined): string | undefined => {
+  const normalizedHost = host?.trim();
+  if (!normalizedHost) {
+    return undefined;
+  }
+
+  if (normalizedHost.startsWith("[") && normalizedHost.endsWith("]")) {
+    return normalizedHost.slice(1, -1);
+  }
+
+  return normalizedHost;
+};
+
+const isWildcardHost = (host: string): boolean => host === "0.0.0.0" || host === "::";
+
+const formatHostForUrl = (host: string): string =>
+  host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 
 const resolveDevConnectHost = (host: string | undefined): string => {
-  const normalizedHost = host?.trim();
+  const normalizedHost = normalizeHost(host);
   if (!normalizedHost || normalizedHost === "localhost" || isWildcardHost(normalizedHost)) {
     return DEFAULT_DEV_CONNECT_HOST;
   }
@@ -161,7 +176,7 @@ export function createDevRunnerEnv({
     const serverPort = port ?? BASE_SERVER_PORT + serverOffset;
     const webPort = BASE_WEB_PORT + webOffset;
     const resolvedStateDir = yield* resolveStateDir(stateDir);
-    const webBindHost = host ?? DEFAULT_DEV_CONNECT_HOST;
+    const webBindHost = normalizeHost(host) ?? DEFAULT_DEV_CONNECT_HOST;
     const webConnectHost = resolveDevConnectHost(host);
 
     const output: NodeJS.ProcessEnv = {
@@ -171,8 +186,9 @@ export function createDevRunnerEnv({
       ELECTRON_RENDERER_PORT: String(webPort),
       T3CODE_WEB_BIND_HOST: webBindHost,
       T3CODE_WEB_CONNECT_HOST: webConnectHost,
-      VITE_WS_URL: `ws://${webConnectHost}:${serverPort}`,
-      VITE_DEV_SERVER_URL: devUrl?.toString() ?? `http://${webConnectHost}:${webPort}`,
+      VITE_WS_URL: `ws://${formatHostForUrl(webConnectHost)}:${serverPort}`,
+      VITE_DEV_SERVER_URL:
+        devUrl?.toString() ?? `http://${formatHostForUrl(webConnectHost)}:${webPort}`,
       T3CODE_STATE_DIR: resolvedStateDir,
     };
 

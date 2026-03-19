@@ -104,6 +104,30 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       }),
     );
 
+    it.effect("formats IPv6 connect hosts only when building URLs", () =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "dev",
+          baseEnv: {},
+          serverOffset: 0,
+          webOffset: 0,
+          stateDir: undefined,
+          authToken: undefined,
+          noBrowser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: "[::1]",
+          port: 4222,
+          devUrl: undefined,
+        });
+
+        assert.equal(env.T3CODE_WEB_BIND_HOST, "::1");
+        assert.equal(env.T3CODE_WEB_CONNECT_HOST, "::1");
+        assert.equal(env.VITE_WS_URL, "ws://[::1]:4222");
+        assert.equal(env.VITE_DEV_SERVER_URL, "http://[::1]:5733");
+      }),
+    );
+
     it.effect("does not force websocket logging on in dev mode when unset", () =>
       Effect.gen(function* () {
         const env = yield* createDevRunnerEnv({
