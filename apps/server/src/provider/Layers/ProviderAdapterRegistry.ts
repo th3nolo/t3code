@@ -18,6 +18,7 @@ import {
 import { ClaudeAdapter } from "../Services/ClaudeAdapter.ts";
 import { CodexAdapter } from "../Services/CodexAdapter.ts";
 import { CursorAdapter } from "../Services/CursorAdapter.ts";
+import { GeminiAdapter } from "../Services/GeminiAdapter.ts";
 import { OpenCodeAdapter } from "../Services/OpenCodeAdapter.ts";
 
 export interface ProviderAdapterRegistryLiveOptions {
@@ -28,12 +29,14 @@ const makeProviderAdapterRegistry = Effect.fn("makeProviderAdapterRegistry")(fun
   options?: ProviderAdapterRegistryLiveOptions,
 ) {
   const cursorAdapterOption = yield* Effect.serviceOption(CursorAdapter);
+  const geminiAdapterOption = yield* Effect.serviceOption(GeminiAdapter);
   const adapters =
     options?.adapters !== undefined
       ? options.adapters
       : [
           yield* CodexAdapter,
           yield* ClaudeAdapter,
+          ...(geminiAdapterOption._tag === "Some" ? [geminiAdapterOption.value] : []),
           yield* OpenCodeAdapter,
           ...(cursorAdapterOption._tag === "Some" ? [cursorAdapterOption.value] : []),
         ];

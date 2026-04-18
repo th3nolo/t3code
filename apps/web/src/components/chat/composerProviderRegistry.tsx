@@ -159,10 +159,11 @@ function createProviderRegistryEntry(
 const composerProviderRegistry: Record<ProviderKind, ProviderRegistryEntry> = {
   codex: createProviderRegistryEntry("codex"),
   claudeAgent: createProviderRegistryEntry("claudeAgent"),
-  cursor: createProviderRegistryEntry("cursor"),
+  gemini: createProviderRegistryEntry("gemini"),
   opencode: createProviderRegistryEntry("opencode", {
     showInteractionModeToggle: false,
   }),
+  cursor: createProviderRegistryEntry("cursor"),
 };
 
 export function getComposerProviderState(input: ComposerProviderStateInput): ComposerProviderState {

@@ -5,6 +5,7 @@ import {
   type ClaudeModelOptions,
   type CodexModelOptions,
   type CursorModelOptions,
+  type GeminiModelOptions,
   type ModelCapabilities,
   type ModelSelection,
   type OpenCodeModelOptions,
@@ -150,6 +151,21 @@ export function normalizeOpenCodeModelOptionsWithCapabilities(
   return Object.keys(nextOptions).length > 0 ? nextOptions : undefined;
 }
 
+export function normalizeGeminiModelOptionsWithCapabilities(
+  caps: ModelCapabilities,
+  modelOptions: GeminiModelOptions | null | undefined,
+): GeminiModelOptions | undefined {
+  const effort = resolveEffort(caps, modelOptions?.effort);
+  const thinking = caps.supportsThinkingToggle ? modelOptions?.thinking : undefined;
+  const contextWindow = resolveContextWindow(caps, modelOptions?.contextWindow);
+  const nextOptions: GeminiModelOptions = {
+    ...(thinking !== undefined ? { thinking } : {}),
+    ...(effort ? { effort: effort as GeminiModelOptions["effort"] } : {}),
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
+  };
+  return Object.keys(nextOptions).length > 0 ? nextOptions : undefined;
+}
+
 export function normalizeProviderModelOptionsWithCapabilities(
   provider: ProviderKind,
   caps: ModelCapabilities,
@@ -160,6 +176,8 @@ export function normalizeProviderModelOptionsWithCapabilities(
       return normalizeCodexModelOptionsWithCapabilities(caps, modelOptions as CodexModelOptions);
     case "claudeAgent":
       return normalizeClaudeModelOptionsWithCapabilities(caps, modelOptions as ClaudeModelOptions);
+    case "gemini":
+      return normalizeGeminiModelOptionsWithCapabilities(caps, modelOptions as GeminiModelOptions);
     case "cursor":
       return normalizeCursorModelOptionsWithCapabilities(caps, modelOptions as CursorModelOptions);
     case "opencode":
@@ -266,6 +284,12 @@ export function createModelSelection(
         provider,
         model,
         ...(options ? { options: options as ClaudeModelOptions } : {}),
+      };
+    case "gemini":
+      return {
+        provider,
+        model,
+        ...(options ? { options: options as GeminiModelOptions } : {}),
       };
     case "cursor":
       return {

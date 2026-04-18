@@ -46,6 +46,16 @@ export const CursorModelOptions = Schema.Struct({
   contextWindow: Schema.optional(Schema.String),
 });
 export type CursorModelOptions = typeof CursorModelOptions.Type;
+export const GEMINI_EFFORT_OPTIONS = ["low", "medium", "high", "max"] as const;
+export const GeminiEffort = Schema.Literals(GEMINI_EFFORT_OPTIONS);
+export type GeminiEffort = typeof GeminiEffort.Type;
+
+export const GeminiModelOptions = Schema.Struct({
+  thinking: Schema.optional(Schema.Boolean),
+  effort: Schema.optional(GeminiEffort),
+  contextWindow: Schema.optional(Schema.String),
+});
+export type GeminiModelOptions = typeof GeminiModelOptions.Type;
 export const OpenCodeModelOptions = Schema.Struct({
   variant: Schema.optional(TrimmedNonEmptyString),
   agent: Schema.optional(TrimmedNonEmptyString),
@@ -55,6 +65,7 @@ export type OpenCodeModelOptions = typeof OpenCodeModelOptions.Type;
 export const ProviderModelOptions = Schema.Struct({
   codex: Schema.optional(CodexModelOptions),
   claudeAgent: Schema.optional(ClaudeModelOptions),
+  gemini: Schema.optional(GeminiModelOptions),
   cursor: Schema.optional(CursorModelOptions),
   opencode: Schema.optional(OpenCodeModelOptions),
 });
@@ -88,8 +99,9 @@ export type ModelCapabilities = typeof ModelCapabilities.Type;
 export const DEFAULT_MODEL_BY_PROVIDER: Record<ProviderKind, string> = {
   codex: "gpt-5.4",
   claudeAgent: "claude-sonnet-4-6",
-  cursor: "auto",
+  gemini: "auto",
   opencode: "openai/gpt-5",
+  cursor: "auto",
 };
 
 export const DEFAULT_MODEL = DEFAULT_MODEL_BY_PROVIDER.codex;
@@ -98,8 +110,9 @@ export const DEFAULT_MODEL = DEFAULT_MODEL_BY_PROVIDER.codex;
 export const DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER: Record<ProviderKind, string> = {
   codex: "gpt-5.4-mini",
   claudeAgent: "claude-haiku-4-5",
-  cursor: "composer-2",
+  gemini: "gemini-2.5-flash-lite",
   opencode: "openai/gpt-5",
+  cursor: "composer-2",
 };
 
 export const MODEL_SLUG_ALIASES_BY_PROVIDER: Record<ProviderKind, Record<string, string>> = {
@@ -127,6 +140,8 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Record<ProviderKind, Record<string,
     "claude-haiku-4.5": "claude-haiku-4-5",
     "claude-haiku-4-5-20251001": "claude-haiku-4-5",
   },
+  gemini: {},
+  opencode: {},
   cursor: {
     composer: "composer-2",
     "composer-1.5": "composer-1.5",
@@ -138,7 +153,6 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Record<ProviderKind, Record<string,
     "opus-4.5-thinking": "claude-opus-4-5",
     "opus-4.5": "claude-opus-4-5",
   },
-  opencode: {},
 };
 
 // ── Provider display names ────────────────────────────────────────────
@@ -146,6 +160,7 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Record<ProviderKind, Record<string,
 export const PROVIDER_DISPLAY_NAMES: Record<ProviderKind, string> = {
   codex: "Codex",
   claudeAgent: "Claude",
-  cursor: "Cursor",
+  gemini: "Gemini",
   opencode: "OpenCode",
+  cursor: "Cursor",
 };

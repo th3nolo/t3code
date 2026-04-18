@@ -49,6 +49,13 @@ const PROVIDER_CUSTOM_MODEL_CONFIG: Record<ProviderKind, ProviderCustomModelConf
     placeholder: "your-claude-model-slug",
     example: "claude-sonnet-5-0",
   },
+  gemini: {
+    provider: "gemini",
+    title: "Gemini",
+    description: "Save additional Gemini model slugs for the picker and `/model` command.",
+    placeholder: "your-gemini-model-slug",
+    example: "gemini-2.5-pro",
+  },
   cursor: {
     provider: "cursor",
     title: "Cursor",
@@ -182,6 +189,12 @@ export function getCustomModelOptionsByProvider(
       providers,
       "claudeAgent",
       selectedProvider === "claudeAgent" ? selectedModel : undefined,
+    ),
+    gemini: getAppModelOptions(
+      settings,
+      providers,
+      "gemini",
+      selectedProvider === "gemini" ? selectedModel : undefined,
     ),
     cursor: getAppModelOptions(
       settings,

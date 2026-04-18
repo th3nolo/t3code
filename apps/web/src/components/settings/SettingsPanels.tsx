@@ -539,6 +539,12 @@ export function GeneralSettingsPanel() {
       settings.providers.claudeAgent.customModels.length > 0 ||
       settings.providers.claudeAgent.launchArgs !== "",
     ),
+    gemini: Boolean(
+      settings.providers.gemini.binaryPath !==
+        DEFAULT_UNIFIED_SETTINGS.providers.gemini.binaryPath ||
+      settings.providers.gemini.customModels.length > 0 ||
+      settings.providers.gemini.launchArgs !== "",
+    ),
     cursor: Boolean(
       settings.providers.cursor.binaryPath !==
         DEFAULT_UNIFIED_SETTINGS.providers.cursor.binaryPath ||
@@ -559,6 +565,7 @@ export function GeneralSettingsPanel() {
   >({
     codex: "",
     claudeAgent: "",
+    gemini: "",
     cursor: "",
     opencode: "",
   });

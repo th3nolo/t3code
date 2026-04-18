@@ -3,6 +3,7 @@ import {
   type ClaudeModelOptions,
   type CodexModelOptions,
   type CursorModelOptions,
+  type GeminiModelOptions,
   type OpenCodeModelOptions,
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
@@ -91,20 +92,28 @@ export function applyServerSettingsPatch(
                 selectionPatch.options as ClaudeModelOptions | undefined,
               ),
             }
-          : provider === "cursor"
+          : provider === "gemini"
             ? {
                 provider,
                 model,
                 ...withModelSelectionOptions(
-                  selectionPatch.options as CursorModelOptions | undefined,
+                  selectionPatch.options as GeminiModelOptions | undefined,
                 ),
               }
-            : {
-                provider,
-                model,
-                ...withModelSelectionOptions(
-                  selectionPatch.options as OpenCodeModelOptions | undefined,
-                ),
-              },
+            : provider === "cursor"
+              ? {
+                  provider,
+                  model,
+                  ...withModelSelectionOptions(
+                    selectionPatch.options as CursorModelOptions | undefined,
+                  ),
+                }
+              : {
+                  provider,
+                  model,
+                  ...withModelSelectionOptions(
+                    selectionPatch.options as OpenCodeModelOptions | undefined,
+                  ),
+                },
   };
 }

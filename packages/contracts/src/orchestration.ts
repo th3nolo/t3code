@@ -3,6 +3,7 @@ import {
   ClaudeModelOptions,
   CodexModelOptions,
   CursorModelOptions,
+  GeminiModelOptions,
   OpenCodeModelOptions,
 } from "./model.ts";
 import { RepositoryIdentity } from "./environment.ts";
@@ -30,7 +31,13 @@ export const ORCHESTRATION_WS_METHODS = {
   subscribeThread: "orchestration.subscribeThread",
 } as const;
 
-export const ProviderKind = Schema.Literals(["codex", "claudeAgent", "cursor", "opencode"]);
+export const ProviderKind = Schema.Literals([
+  "codex",
+  "claudeAgent",
+  "gemini",
+  "opencode",
+  "cursor",
+]);
 export type ProviderKind = typeof ProviderKind.Type;
 export const ProviderApprovalPolicy = Schema.Literals([
   "untrusted",
@@ -68,6 +75,12 @@ export const CursorModelSelection = Schema.Struct({
   options: Schema.optionalKey(CursorModelOptions),
 });
 export type CursorModelSelection = typeof CursorModelSelection.Type;
+export const GeminiModelSelection = Schema.Struct({
+  provider: Schema.Literal("gemini"),
+  model: TrimmedNonEmptyString,
+  options: Schema.optionalKey(GeminiModelOptions),
+});
+export type GeminiModelSelection = typeof GeminiModelSelection.Type;
 export const OpenCodeModelSelection = Schema.Struct({
   provider: Schema.Literal("opencode"),
   model: TrimmedNonEmptyString,
@@ -78,8 +91,9 @@ export type OpenCodeModelSelection = typeof OpenCodeModelSelection.Type;
 export const ModelSelection = Schema.Union([
   CodexModelSelection,
   ClaudeModelSelection,
-  CursorModelSelection,
+  GeminiModelSelection,
   OpenCodeModelSelection,
+  CursorModelSelection,
 ]);
 export type ModelSelection = typeof ModelSelection.Type;
 

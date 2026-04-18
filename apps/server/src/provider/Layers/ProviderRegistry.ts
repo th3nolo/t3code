@@ -10,10 +10,12 @@ import { ServerConfig } from "../../config.ts";
 import { ClaudeProviderLive } from "./ClaudeProvider.ts";
 import { CodexProviderLive } from "./CodexProvider.ts";
 import { CursorProviderLive } from "./CursorProvider.ts";
+import { GeminiProviderLive } from "./GeminiProvider.ts";
 import { OpenCodeProviderLive } from "./OpenCodeProvider.ts";
 import { ClaudeProvider } from "../Services/ClaudeProvider.ts";
 import { CodexProvider } from "../Services/CodexProvider.ts";
 import { CursorProvider } from "../Services/CursorProvider.ts";
+import { GeminiProvider } from "../Services/GeminiProvider.ts";
 import { OpenCodeProvider } from "../Services/OpenCodeProvider.ts";
 import { ProviderRegistry, type ProviderRegistryShape } from "../Services/ProviderRegistry.ts";
 import {
@@ -96,6 +98,7 @@ const ProviderRegistryLiveBase = Layer.effect(
     const path = yield* Path.Path;
 
     const cursorProvider = yield* CursorProvider;
+    const geminiProvider = yield* GeminiProvider;
 
     const providerSources = [
       {
@@ -111,6 +114,12 @@ const ProviderRegistryLiveBase = Layer.effect(
         streamChanges: claudeProvider.streamChanges,
       },
       {
+        provider: "gemini",
+        getSnapshot: geminiProvider.getSnapshot,
+        refresh: geminiProvider.refresh,
+        streamChanges: geminiProvider.streamChanges,
+      },
+      {
         provider: "opencode",
         getSnapshot: openCodeProvider.getSnapshot,
         refresh: openCodeProvider.refresh,
@@ -123,7 +132,14 @@ const ProviderRegistryLiveBase = Layer.effect(
         streamChanges: cursorProvider.streamChanges,
       },
     ] satisfies ReadonlyArray<ProviderSnapshotSource>;
-    const activeProviders = PROVIDER_CACHE_IDS;
+    const providerSourceIds = new Set(providerSources.map((source) => source.provider));
+    // Only hydrate cached providers that still have a live source wired into
+    // this registry. A cache file for a provider without a source (e.g. a
+    // provider that was removed or not yet registered) should be ignored
+    // rather than crashing the startup flow.
+    const activeProviders = PROVIDER_CACHE_IDS.filter((provider) =>
+      providerSourceIds.has(provider),
+    );
     const changesPubSub = yield* Effect.acquireRelease(
       PubSub.unbounded<ReadonlyArray<ServerProvider>>(),
       PubSub.shutdown,
@@ -148,8 +164,11 @@ const ProviderRegistryLiveBase = Layer.effect(
     const cachedProviders = yield* Effect.forEach(
       activeProviders,
       (provider) => {
-        const filePath = cachePathByProvider.get(provider)!;
-        const fallbackProvider = fallbackByProvider.get(provider)!;
+        const filePath = cachePathByProvider.get(provider);
+        const fallbackProvider = fallbackByProvider.get(provider);
+        if (!filePath || !fallbackProvider) {
+          return Effect.succeed(undefined);
+        }
         return readProviderStatusCache(filePath).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.map((cachedProvider) =>
@@ -172,9 +191,13 @@ const ProviderRegistryLiveBase = Layer.effect(
     );
     const providersRef = yield* Ref.make<ReadonlyArray<ServerProvider>>(cachedProviders);
 
-    const persistProvider = (provider: ServerProvider) =>
-      writeProviderStatusCache({
-        filePath: cachePathByProvider.get(provider.provider)!,
+    const persistProvider = (provider: ServerProvider) => {
+      const filePath = cachePathByProvider.get(provider.provider);
+      if (!filePath) {
+        return Effect.void;
+      }
+      return writeProviderStatusCache({
+        filePath,
         provider,
       }).pipe(
         Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -182,6 +205,7 @@ const ProviderRegistryLiveBase = Layer.effect(
         Effect.tapError(Effect.logError),
         Effect.ignore,
       );
+    };
 
     const upsertProviders = Effect.fn("upsertProviders")(function* (
       nextProviders: ReadonlyArray<ServerProvider>,
@@ -286,6 +310,7 @@ export const ProviderRegistryLive = Layer.unwrap(
       Layer.provideMerge(CursorProviderLive),
       Layer.provideMerge(CodexProviderLive),
       Layer.provideMerge(ClaudeProviderLive),
+      Layer.provideMerge(GeminiProviderLive),
       Layer.provideMerge(OpenCodeProviderLive),
     ),
   ),

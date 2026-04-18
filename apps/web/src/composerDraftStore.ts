@@ -531,7 +531,11 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
 }
 
 function normalizeProviderKind(value: unknown): ProviderKind | null {
-  return value === "codex" || value === "claudeAgent" || value === "cursor" || value === "opencode"
+  return value === "codex" ||
+    value === "claudeAgent" ||
+    value === "gemini" ||
+    value === "cursor" ||
+    value === "opencode"
     ? value
     : null;
 }
@@ -553,6 +557,10 @@ function normalizeProviderModelOptions(
   const cursorCandidate =
     candidate?.cursor && typeof candidate.cursor === "object"
       ? (candidate.cursor as Record<string, unknown>)
+      : null;
+  const geminiCandidate =
+    candidate?.gemini && typeof candidate.gemini === "object"
+      ? (candidate.gemini as Record<string, unknown>)
       : null;
   const openCodeCandidate =
     candidate?.opencode && typeof candidate.opencode === "object"
@@ -670,12 +678,15 @@ function normalizeProviderModelOptions(
         }
       : undefined;
 
-  if (!codex && !claude && cursor === undefined && !opencode) {
+  const gemini = geminiCandidate !== null ? {} : undefined;
+
+  if (!codex && !claude && !gemini && cursor === undefined && !opencode) {
     return null;
   }
   return {
     ...(codex ? { codex } : {}),
     ...(claude ? { claudeAgent: claude } : {}),
+    ...(gemini ? { gemini } : {}),
     ...(cursor !== undefined ? { cursor } : {}),
     ...(opencode ? { opencode } : {}),
   };
@@ -766,7 +777,7 @@ function legacyToModelSelectionByProvider(
   const result: Partial<Record<ProviderKind, ModelSelection>> = {};
   // Add entries from the options bag (for non-active providers)
   if (modelOptions) {
-    for (const provider of ["codex", "claudeAgent", "cursor", "opencode"] as const) {
+    for (const provider of ["codex", "claudeAgent", "gemini", "opencode", "cursor"] as const) {
       const options = modelOptions[provider];
       if (options && Object.keys(options).length > 0) {
         result[provider] = createModelSelection(
@@ -2312,7 +2323,13 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             }
             const base = existing ?? createEmptyThreadDraft();
             const nextMap = { ...base.modelSelectionByProvider };
-            for (const provider of ["codex", "claudeAgent", "cursor", "opencode"] as const) {
+            for (const provider of [
+              "codex",
+              "claudeAgent",
+              "gemini",
+              "opencode",
+              "cursor",
+            ] as const) {
               // Only touch providers explicitly present in the input
               if (!normalizedOpts || !(provider in normalizedOpts)) continue;
               const opts = normalizedOpts[provider];
