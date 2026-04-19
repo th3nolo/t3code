@@ -1,3 +1,4 @@
+import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 import * as EffectAcpErrors from "effect-acp/errors";
 
@@ -5,6 +6,7 @@ import {
   acpPermissionOutcome,
   isAcpMethodNotFound,
   mapAcpToAdapterError,
+  tolerateOptionalAcpCall,
 } from "./AcpAdapterSupport.ts";
 
 describe("AcpAdapterSupport", () => {
@@ -59,6 +61,42 @@ describe("AcpAdapterSupport", () => {
       expect(
         isAcpMethodNotFound(new EffectAcpErrors.AcpProtocolParseError({ detail: "bad" })),
       ).toBe(false);
+    });
+  });
+
+  describe("tolerateOptionalAcpCall", () => {
+    it("returns applied on success", async () => {
+      const result = await Effect.runPromise(
+        tolerateOptionalAcpCall({
+          label: "session/set_mode",
+          effect: Effect.succeed("ok"),
+        }),
+      );
+
+      expect(result).toEqual({ _tag: "applied", value: "ok" });
+    });
+
+    it("returns unsupported for method-not-found ACP errors", async () => {
+      const result = await Effect.runPromise(
+        tolerateOptionalAcpCall({
+          label: "session/set_mode",
+          effect: Effect.fail(EffectAcpErrors.AcpRequestError.methodNotFound("session/set_mode")),
+        }),
+      );
+
+      expect(result).toEqual({ _tag: "unsupported" });
+    });
+
+    it("returns failed for non-method-not-found ACP errors", async () => {
+      const error = EffectAcpErrors.AcpRequestError.invalidParams("bad");
+      const result = await Effect.runPromise(
+        tolerateOptionalAcpCall({
+          label: "session/set_mode",
+          effect: Effect.fail(error),
+        }),
+      );
+
+      expect(result).toEqual({ _tag: "failed", error });
     });
   });
 });

@@ -1,6 +1,8 @@
 import * as path from "node:path";
 import * as os from "node:os";
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it as effectIt } from "@effect/vitest";
@@ -8,11 +10,18 @@ import { Effect, Layer } from "effect";
 import { expect } from "vitest";
 
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { checkGeminiProviderStatus, getGeminiBuiltInModels } from "./GeminiProvider.ts";
+import {
+  checkGeminiProviderStatus,
+  discoverGeminiCapabilitiesViaAcp,
+  getGeminiBuiltInModels,
+} from "./GeminiProvider.ts";
 
 function shellSingleQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const geminiMockAgentPath = path.join(__dirname, "../../../scripts/gemini-acp-mock-agent.ts");
 
 function makeFakeGeminiCli(input: {
   readonly stdout?: string;
@@ -37,6 +46,36 @@ function makeFakeGeminiCli(input: {
   writeFileSync(cliPath, script, "utf8");
   chmodSync(cliPath, 0o755);
   return cliPath;
+}
+
+async function makeGeminiAcpWrapper(input: {
+  readonly argvLogPath: string;
+  readonly supportedFlavor: "acp" | "experimental-acp";
+}) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "t3code-gemini-provider-acp-"));
+  const wrapperPath = path.join(dir, "fake-gemini.sh");
+  const script = `#!/bin/sh
+printf '%s\t' "$@" >> ${JSON.stringify(input.argvLogPath)}
+printf '\n' >> ${JSON.stringify(input.argvLogPath)}
+for arg in "$@"; do
+  if [ "$arg" = "--${input.supportedFlavor}" ]; then
+    exec ${JSON.stringify("bun")} ${JSON.stringify(geminiMockAgentPath)} "$@"
+  fi
+done
+exit 9
+`;
+  await writeFile(wrapperPath, script, "utf8");
+  await chmod(wrapperPath, 0o755);
+  return wrapperPath;
+}
+
+async function readArgvLog(filePath: string) {
+  const raw = await readFile(filePath, "utf8");
+  return raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => line.split("\t").filter((token) => token.length > 0));
 }
 
 const TestLayer = Layer.mergeAll(ServerSettingsService.layerTest(), NodeServices.layer);
@@ -189,6 +228,50 @@ effectIt.layer(TestLayer)("checkGeminiProviderStatus", (it) => {
       }
       expect(slugs).toContain("gemini-custom-one");
       expect(slugs).toContain("gemini-custom-two");
+    }),
+  );
+});
+
+effectIt.layer(NodeServices.layer)("discoverGeminiCapabilitiesViaAcp", (it) => {
+  it.effect("reuses the resolved experimental ACP flavor across capability probes", () =>
+    Effect.gen(function* () {
+      const tempDir = yield* Effect.promise(() =>
+        mkdtemp(path.join(os.tmpdir(), "t3code-gemini-provider-argv-")),
+      );
+      const argvLogPath = path.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => writeFile(argvLogPath, "", "utf8"));
+      const wrapperPath = yield* Effect.promise(() =>
+        makeGeminiAcpWrapper({
+          argvLogPath,
+          supportedFlavor: "experimental-acp",
+        }),
+      );
+
+      const models = yield* discoverGeminiCapabilitiesViaAcp({
+        geminiSettings: {
+          enabled: true,
+          binaryPath: wrapperPath,
+          launchArgs: "",
+          customModels: [],
+        },
+        existingModels: getGeminiBuiltInModels(),
+      });
+
+      expect(models.map((model) => model.slug)).toEqual([
+        "auto",
+        "gemini-3.1-pro-preview",
+        "gemini-3-flash-preview",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+      ]);
+
+      const argvLog = yield* Effect.promise(() => readArgvLog(argvLogPath));
+      const acpAttempts = argvLog.filter((argv) => argv.includes("--acp"));
+      const experimentalAttempts = argvLog.filter((argv) => argv.includes("--experimental-acp"));
+
+      expect(acpAttempts.length).toBeGreaterThanOrEqual(1);
+      expect(experimentalAttempts.length).toBeGreaterThanOrEqual(2);
+      expect(argvLog.some((argv) => argv.includes("--experimental-acp"))).toBe(true);
     }),
   );
 });

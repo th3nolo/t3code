@@ -22,13 +22,12 @@ import {
 } from "@t3tools/contracts";
 import { Effect, FileSystem, Layer, Ref, Scope, SynchronizedRef } from "effect";
 import { ChildProcessSpawner } from "effect/unstable/process";
-import type * as EffectAcpErrors from "effect-acp/errors";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import { extractProposedPlanMarkdown } from "../proposedPlan.ts";
-import { isAcpMethodNotFound } from "../acp/AcpAdapterSupport.ts";
+import { tolerateOptionalAcpCall } from "../acp/AcpAdapterSupport.ts";
 import {
   findModeByAliases,
   isPlanMode as baseIsPlanMode,
@@ -40,13 +39,12 @@ import { type AcpSessionRuntimeShape } from "../acp/AcpSessionRuntime.ts";
 import {
   applyGeminiAcpConfigOptions,
   type GeminiAcpFlavor,
+  initializeGeminiCliHome,
   makeGeminiAcpRuntime,
   resolveCachedGeminiFlavor,
   resolveGeminiAcpFlavor,
   resolveGeminiAuthMethod,
-  seedGeminiCliHomeAuth,
   validateGeminiLaunchArgs,
-  writeGeminiCliSettings,
 } from "../acp/GeminiAcpSupport.ts";
 import { GeminiAdapter, type GeminiAdapterShape } from "../Services/GeminiAdapter.ts";
 import {
@@ -80,10 +78,11 @@ const GEMINI_YOLO_MODE_ALIASES = ["yolo", "full-access", "full_access"];
 /**
  * Fallback estimate for how many messages a single turn writes to the
  * chat file (one user prompt + one assistant reply). Used only when the
- * persisted chat file can't be read; otherwise `countPersistedGeminiMessages`
- * is authoritative. Turns with multiple tool calls write more than 2 —
- * the estimate intentionally under-counts to avoid double-booking messages
- * when an authoritative count becomes available on the next turn.
+ * persisted chat file can't be read at turn-settle time; otherwise
+ * `countPersistedGeminiMessages` is authoritative. Turns with multiple
+ * tool calls write more than 2. We intentionally keep the fallback
+ * coarse and repair it on the next authoritative pre-turn / rollback /
+ * stop read so only the newest unreadable turn can drift.
  */
 const GEMINI_ASSUMED_MESSAGES_PER_TURN = 2;
 
@@ -164,28 +163,6 @@ function resolveRequestedGeminiModeId(input: {
 }
 
 /**
- * Swallow optional ACP-request failures so Gemini session start doesn't
- * die on methods the agent hasn't implemented. -32601 ("Method not
- * found") is logged at debug; any other AcpError at warn. Both resolve
- * to void.
- */
-function tolerateOptionalAcpCall(label: string) {
-  return (effect: Effect.Effect<unknown, EffectAcpErrors.AcpError>) =>
-    effect.pipe(
-      Effect.asVoid,
-      Effect.catch((error) =>
-        isAcpMethodNotFound(error)
-          ? Effect.logDebug(`Gemini ACP ${label}: method not implemented, ignoring`).pipe(
-              Effect.asVoid,
-            )
-          : Effect.logWarning(`Gemini ACP ${label} failed, ignoring`, {
-              error: error.message,
-            }).pipe(Effect.asVoid),
-      ),
-    );
-}
-
-/**
  * Use raw `session/set_mode`: the shared `AcpSessionRuntime.setMode`
  * helper routes through `setConfigOption("mode", …)`, which Gemini
  * rejects as -32601.
@@ -205,13 +182,16 @@ function applyRequestedSessionMode(input: {
     });
     if (!requestedModeId) return undefined;
     if (input.lastAppliedMode === requestedModeId) return requestedModeId;
-    yield* input.runtime
-      .request("session/set_mode", {
-        sessionId: input.sessionId,
-        modeId: requestedModeId,
-      })
-      .pipe(Effect.asVoid, tolerateOptionalAcpCall("session/set_mode"));
-    return requestedModeId;
+    const result = yield* tolerateOptionalAcpCall({
+      label: "session/set_mode",
+      effect: input.runtime
+        .request("session/set_mode", {
+          sessionId: input.sessionId,
+          modeId: requestedModeId,
+        })
+        .pipe(Effect.asVoid),
+    });
+    return result._tag === "applied" ? requestedModeId : undefined;
   });
 }
 
@@ -227,32 +207,60 @@ function applyRequestedSessionModelSelection(input: {
   readonly lastAppliedModel: string | undefined;
   readonly lastAppliedConfigKey: string | undefined;
 }): Effect.Effect<
-  { readonly appliedModel: string | undefined; readonly appliedConfigKey: string },
+  {
+    readonly appliedModel: string | undefined;
+    readonly shouldCacheModel: boolean;
+    readonly appliedConfigKey: string;
+    readonly shouldCacheConfigKey: boolean;
+  },
   never
 > {
   return Effect.gen(function* () {
     const trimmed = input.model?.trim();
     const resolvedModel = trimmed && trimmed.length > 0 && trimmed !== "auto" ? trimmed : undefined;
-    if (resolvedModel && input.lastAppliedModel !== resolvedModel) {
-      yield* input.runtime
-        .request("session/set_model", {
-          sessionId: input.sessionId,
-          modelId: resolvedModel,
-        })
-        .pipe(Effect.asVoid, tolerateOptionalAcpCall("session/set_model"));
-    }
     const configKey = geminiModelOptionsKey(input.modelOptions);
-    if (input.lastAppliedConfigKey !== configKey) {
-      yield* applyGeminiAcpConfigOptions({
-        runtime: input.runtime,
-        modelOptions: input.modelOptions,
-      }).pipe(
-        Effect.catch(() =>
-          Effect.logDebug("Gemini ACP config-option update failed, ignoring").pipe(Effect.asVoid),
-        ),
-      );
+    let modelResult: { readonly shouldCache: boolean; readonly value: string | undefined };
+    if (resolvedModel === undefined || input.lastAppliedModel === resolvedModel) {
+      modelResult = { shouldCache: resolvedModel !== undefined, value: resolvedModel };
+    } else {
+      const result = yield* tolerateOptionalAcpCall({
+        label: "session/set_model",
+        effect: input.runtime
+          .request("session/set_model", {
+            sessionId: input.sessionId,
+            modelId: resolvedModel,
+          })
+          .pipe(Effect.asVoid),
+      });
+      modelResult = {
+        shouldCache: result._tag === "applied",
+        value: result._tag === "applied" ? resolvedModel : undefined,
+      };
     }
-    return { appliedModel: resolvedModel ?? input.lastAppliedModel, appliedConfigKey: configKey };
+
+    let configResult: { readonly shouldCache: boolean; readonly value: string };
+    if (input.lastAppliedConfigKey === configKey) {
+      configResult = { shouldCache: true, value: configKey };
+    } else {
+      const result = yield* tolerateOptionalAcpCall({
+        label: "session/set_config_option",
+        effect: applyGeminiAcpConfigOptions({
+          runtime: input.runtime,
+          modelOptions: input.modelOptions,
+        }),
+      });
+      configResult = {
+        shouldCache: result._tag === "applied",
+        value: configKey,
+      };
+    }
+
+    return {
+      appliedModel: modelResult.value,
+      shouldCacheModel: modelResult.shouldCache,
+      appliedConfigKey: configResult.value,
+      shouldCacheConfigKey: configResult.shouldCache,
+    };
   });
 }
 
@@ -264,6 +272,13 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
     const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
     const flavorCacheRef = yield* SynchronizedRef.make(new Map<string, GeminiAcpFlavor>());
+    const toProcessError = (threadId: ThreadId, cause: { readonly message: string }) =>
+      new ProviderAdapterProcessError({
+        provider: PROVIDER,
+        threadId,
+        detail: cause.message,
+        cause,
+      });
 
     /**
      * Resolve the Gemini ACP flavor (`--acp` vs `--experimental-acp`) and
@@ -281,24 +296,10 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
         probe: Effect.gen(function* () {
           const probeHome = yield* fileSystem
             .makeTempDirectoryScoped({ prefix: "t3-gemini-acp-probe-" })
-            .pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapterProcessError({
-                    provider: PROVIDER,
-                    threadId: input.threadId,
-                    detail: cause.message,
-                    cause,
-                  }),
-              ),
-            );
-          yield* writeGeminiCliSettings({ home: probeHome }).pipe(
+            .pipe(Effect.mapError((cause) => toProcessError(input.threadId, cause)));
+          yield* initializeGeminiCliHome({ home: probeHome }).pipe(
             Effect.provideService(FileSystem.FileSystem, fileSystem),
-            Effect.orElseSucceed(() => probeHome),
-          );
-          yield* seedGeminiCliHomeAuth({ home: probeHome }).pipe(
-            Effect.provideService(FileSystem.FileSystem, fileSystem),
-            Effect.orElseSucceed(() => [] as ReadonlyArray<string>),
+            Effect.mapError((cause) => toProcessError(input.threadId, cause)),
           );
           return yield* resolveGeminiAcpFlavor({
             childProcessSpawner,
@@ -308,7 +309,7 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
             clientInfo: { name: "t3-code-gemini-acp-probe", version: "0.0.0" },
           }).pipe(
             Effect.map((result): GeminiAcpFlavor => result.flavor),
-            Effect.catchCause(() => Effect.succeed<GeminiAcpFlavor>("acp")),
+            Effect.mapError((cause) => toProcessError(input.threadId, cause)),
           );
         }),
       });
@@ -336,6 +337,55 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
         if (changed) {
           yield* persistMetadata(extra);
         }
+      });
+
+    /**
+     * Drift recovery invariant:
+     * - A turn may temporarily fall back to `+2` when the chat file is unreadable.
+     * - The next authoritative read before a new turn, rollback, or stop repairs
+     *   `extra.messageCount` and the last completed turn's `messageCountAfter`.
+     * - That bounds uncertainty to the newest unreadable turn instead of letting
+     *   the estimate compound across the whole thread.
+     */
+    const refreshAuthoritativeMessageCount = (extra: GeminiExtra, sessionId: string) =>
+      Effect.gen(function* () {
+        const metadata = yield* Ref.get(extra.metadataRef);
+        const chatFile = yield* resolveGeminiChatFile({
+          home: extra.home,
+          sessionId,
+          ...(metadata.chatFileRelativePath
+            ? { chatFileRelativePath: metadata.chatFileRelativePath }
+            : {}),
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.orElseSucceed(() => undefined),
+        );
+        if (!chatFile) return undefined;
+        const countedMessages = yield* countPersistedGeminiMessages(chatFile.absolutePath).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.orElseSucceed(() => undefined),
+        );
+        if (countedMessages === undefined) return undefined;
+
+        extra.messageCount = countedMessages;
+        const changed = yield* Ref.modify(extra.metadataRef, (current) => {
+          let next = withGeminiChatFileRelativePath(current, chatFile.relativePath);
+          const lastTurn = next.turns.at(-1);
+          if (lastTurn?.status === "completed" && lastTurn.messageCountAfter !== countedMessages) {
+            next = updateLastGeminiTurnStatus(next, "completed", {
+              messageCountAfter: countedMessages,
+            });
+          }
+          return [next !== current, next] as const;
+        });
+        if (changed) {
+          yield* persistMetadata(extra);
+        }
+        return {
+          countedMessages,
+          chatFileRelativePath: chatFile.relativePath,
+          chatFilePath: chatFile.absolutePath,
+        } as const;
       });
 
     /**
@@ -393,6 +443,7 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
 
     const truncateChatIfIncomplete = (extra: GeminiExtra, acpSessionId: string) =>
       Effect.gen(function* () {
+        yield* refreshAuthoritativeMessageCount(extra, acpSessionId);
         const metadata = yield* Ref.get(extra.metadataRef);
         const result = yield* resolveAndTruncateIfIncomplete({
           home: extra.home,
@@ -449,48 +500,19 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
           Effect.gen(function* () {
             const geminiSettings = yield* serverSettingsService.getSettings.pipe(
               Effect.map((s) => s.providers.gemini),
-              Effect.mapError(
-                (error) =>
-                  new ProviderAdapterProcessError({
-                    provider: PROVIDER,
-                    threadId: startInput.threadId,
-                    detail: error.message,
-                    cause: error,
-                  }),
-              ),
+              Effect.mapError((error) => toProcessError(startInput.threadId, error)),
             );
             const resolvedCwd = nodePath.resolve(cwd);
             const threadPaths = resolveGeminiThreadPaths({
               providerStateDir: serverConfig.providerStateDir,
               threadId: startInput.threadId,
             });
-            yield* fileSystem.makeDirectory(threadPaths.threadDir, { recursive: true }).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapterProcessError({
-                    provider: PROVIDER,
-                    threadId: startInput.threadId,
-                    detail: cause.message,
-                    cause,
-                  }),
-              ),
-            );
-            yield* writeGeminiCliSettings({ home: threadPaths.home }).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapterProcessError({
-                    provider: PROVIDER,
-                    threadId: startInput.threadId,
-                    detail: cause instanceof Error ? cause.message : String(cause),
-                    cause,
-                  }),
-              ),
-            );
-            // One-shot copy: external `gemini auth login` during a live
-            // session won't propagate until the next startSession.
-            // See seedGeminiCliHomeAuth's JSDoc for the full trade-off.
-            yield* seedGeminiCliHomeAuth({ home: threadPaths.home }).pipe(
-              Effect.orElseSucceed(() => [] as ReadonlyArray<string>),
+            yield* fileSystem
+              .makeDirectory(threadPaths.threadDir, { recursive: true })
+              .pipe(Effect.mapError((cause) => toProcessError(startInput.threadId, cause)));
+            yield* initializeGeminiCliHome({ home: threadPaths.home }).pipe(
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.mapError((cause) => toProcessError(startInput.threadId, cause)),
             );
 
             const persistedMetadataRaw = yield* readGeminiSessionMetadata(threadPaths.metadataPath);
@@ -602,9 +624,15 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
               lastAppliedModel: extra.lastAppliedModel,
               lastAppliedConfigKey: extra.lastAppliedConfigKey,
             });
-            extra.lastAppliedMode = appliedMode ?? extra.lastAppliedMode;
-            extra.lastAppliedModel = appliedModel.appliedModel;
-            extra.lastAppliedConfigKey = appliedModel.appliedConfigKey;
+            if (appliedMode !== undefined) {
+              extra.lastAppliedMode = appliedMode;
+            }
+            if (appliedModel.shouldCacheModel) {
+              extra.lastAppliedModel = appliedModel.appliedModel;
+            }
+            if (appliedModel.shouldCacheConfigKey) {
+              extra.lastAppliedConfigKey = appliedModel.appliedConfigKey;
+            }
           }),
 
         afterSessionCreated: (ctx) =>
@@ -636,6 +664,7 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
 
         beforeTurn: ({ ctx, turnId }) =>
           Effect.gen(function* () {
+            yield* refreshAuthoritativeMessageCount(ctx.extra, ctx.acpSessionId);
             const messageCountBefore = ctx.extra.messageCount;
             yield* Ref.update(ctx.extra.metadataRef, (metadata) =>
               appendGeminiTurn(
@@ -743,6 +772,7 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
 
         afterRollback: ({ ctx, numTurns }) =>
           Effect.gen(function* () {
+            yield* refreshAuthoritativeMessageCount(ctx.extra, ctx.acpSessionId);
             const truncated = yield* Ref.modify(ctx.extra.metadataRef, (metadata) => {
               const { next, truncated } = truncateGeminiTurns(metadata, numTurns);
               return [truncated, next] as const;

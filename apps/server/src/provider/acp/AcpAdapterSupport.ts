@@ -11,6 +11,7 @@ import {
   ProviderAdapterSessionClosedError,
   type ProviderAdapterError,
 } from "../Errors.ts";
+import { Effect } from "effect";
 
 export function mapAcpToAdapterError(
   provider: ProviderKind,
@@ -46,6 +47,28 @@ export function isAcpMethodNotFound(
 ): error is EffectAcpErrors.AcpRequestError {
   return Schema.is(EffectAcpErrors.AcpRequestError)(error) && error.code === -32601;
 }
+
+export type OptionalAcpCallResult<A> =
+  | { readonly _tag: "applied"; readonly value: A }
+  | { readonly _tag: "unsupported" }
+  | { readonly _tag: "failed"; readonly error: EffectAcpErrors.AcpError };
+
+export const tolerateOptionalAcpCall = <A>(input: {
+  readonly label: string;
+  readonly effect: Effect.Effect<A, EffectAcpErrors.AcpError>;
+}): Effect.Effect<OptionalAcpCallResult<A>, never> =>
+  input.effect.pipe(
+    Effect.map((value): OptionalAcpCallResult<A> => ({ _tag: "applied", value })),
+    Effect.catch((error) =>
+      isAcpMethodNotFound(error)
+        ? Effect.logDebug(`ACP ${input.label}: method not implemented, will retry later`).pipe(
+            Effect.as<OptionalAcpCallResult<A>>({ _tag: "unsupported" }),
+          )
+        : Effect.logWarning(`ACP ${input.label} failed, will retry later`, {
+            error: error.message,
+          }).pipe(Effect.as<OptionalAcpCallResult<A>>({ _tag: "failed", error })),
+    ),
+  );
 
 export function acpPermissionOutcome(decision: ProviderApprovalDecision): string {
   switch (decision) {

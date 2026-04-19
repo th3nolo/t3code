@@ -6,7 +6,18 @@ import type {
   ServerProviderModel,
   ServerSettingsError,
 } from "@t3tools/contracts";
-import { Cause, Effect, Equal, Exit, FileSystem, Layer, Option, Result, Stream } from "effect";
+import {
+  Cause,
+  Effect,
+  Equal,
+  Exit,
+  FileSystem,
+  Layer,
+  Option,
+  Result,
+  Stream,
+  SynchronizedRef,
+} from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import {
@@ -25,11 +36,13 @@ import {
   buildGeminiCapabilitiesFromConfigOptions,
   findGeminiModelConfigOption,
   flattenGeminiSessionConfigSelectOptions,
+  type GeminiAcpFlavor,
+  initializeGeminiCliHome,
   makeGeminiAcpRuntime,
+  resolveCachedGeminiFlavor,
+  resolveGeminiAcpFlavor,
   resolveGeminiAuthMethod,
-  seedGeminiCliHomeAuth,
   validateGeminiLaunchArgs,
-  writeGeminiCliSettings,
 } from "../acp/GeminiAcpSupport.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 
@@ -335,27 +348,39 @@ function hasGeminiModelCapabilities(model: Pick<ServerProviderModel, "capabiliti
 
 const withGeminiAcpProbe = <A, E, R>(input: {
   readonly geminiSettings: GeminiSettings;
+  readonly flavorCacheRef?: SynchronizedRef.SynchronizedRef<Map<string, GeminiAcpFlavor>>;
+  readonly cwd?: string;
   readonly useRuntime: (runtime: AcpSessionRuntimeShape) => Effect.Effect<A, E, R>;
 }) =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const fileSystem = yield* FileSystem.FileSystem;
+    const flavorCacheRef =
+      input.flavorCacheRef ?? (yield* SynchronizedRef.make(new Map<string, GeminiAcpFlavor>()));
     const probeHome = yield* fileSystem.makeTempDirectoryScoped({
       prefix: "t3-gemini-acp-cap-probe-",
     });
-    yield* writeGeminiCliSettings({ home: probeHome }).pipe(Effect.orElseSucceed(() => probeHome));
-    yield* seedGeminiCliHomeAuth({ home: probeHome }).pipe(
-      Effect.orElseSucceed(() => [] as ReadonlyArray<string>),
+    yield* initializeGeminiCliHome({ home: probeHome }).pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
     );
+    const flavor = yield* resolveCachedGeminiFlavor({
+      cacheRef: flavorCacheRef,
+      binaryPath: input.geminiSettings.binaryPath,
+      probe: resolveGeminiAcpFlavor({
+        childProcessSpawner: spawner,
+        geminiSettings: input.geminiSettings,
+        cwd: input.cwd ?? process.cwd(),
+        home: probeHome,
+        clientInfo: { name: "t3-code-gemini-provider-probe", version: "0.0.0" },
+      }).pipe(Effect.map((result) => result.flavor)),
+    });
 
-    // Note: keyring-env neutralization is added unconditionally by
-    // buildGeminiAcpSpawnInput (GeminiAcpSupport.ts) — no need to pass
-    // spawnEnv here.
     const runtime = yield* makeGeminiAcpRuntime({
       childProcessSpawner: spawner,
       geminiSettings: input.geminiSettings,
-      cwd: process.cwd(),
+      cwd: input.cwd ?? process.cwd(),
       home: probeHome,
+      flavor,
       clientInfo: { name: "t3-code-gemini-provider-probe", version: "0.0.0" },
       authMethodId: (yield* resolveGeminiAuthMethod()) ?? "oauth-personal",
     });
@@ -365,9 +390,17 @@ const withGeminiAcpProbe = <A, E, R>(input: {
 export const discoverGeminiCapabilitiesViaAcp = (input: {
   readonly geminiSettings: GeminiSettings;
   readonly existingModels: ReadonlyArray<ServerProviderModel>;
-}) =>
+  readonly flavorCacheRef?: SynchronizedRef.SynchronizedRef<Map<string, GeminiAcpFlavor>>;
+  readonly cwd?: string;
+}): Effect.Effect<
+  ReadonlyArray<ServerProviderModel>,
+  unknown,
+  ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem
+> =>
   withGeminiAcpProbe({
     geminiSettings: input.geminiSettings,
+    ...(input.flavorCacheRef !== undefined ? { flavorCacheRef: input.flavorCacheRef } : {}),
+    ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
     useRuntime: (runtime) =>
       Effect.gen(function* () {
         const started = yield* runtime.start();
@@ -420,7 +453,8 @@ export const discoverGeminiCapabilitiesViaAcp = (input: {
           const targetSlugs = new Set(
             input.existingModels.filter((model) => !model.isCustom).map((model) => model.slug),
           );
-          const probedCapabilities = yield* Effect.forEach(
+          const probedCapabilities: ReadonlyArray<readonly [string, ModelCapabilities] | undefined> =
+            yield* Effect.forEach(
             modelChoices,
             (modelChoice) => {
               const modelSlug = modelChoice.value.trim();
@@ -430,6 +464,10 @@ export const discoverGeminiCapabilitiesViaAcp = (input: {
               }
               return withGeminiAcpProbe({
                 geminiSettings: input.geminiSettings,
+                ...(input.flavorCacheRef !== undefined
+                  ? { flavorCacheRef: input.flavorCacheRef }
+                  : {}),
+                ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
                 useRuntime: (probeRuntime) =>
                   Effect.gen(function* () {
                     const probeStarted = yield* probeRuntime.start();
@@ -487,6 +525,7 @@ export const GeminiProviderLive = Layer.effect(
     const serverSettings = yield* ServerSettingsService;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const fileSystem = yield* FileSystem.FileSystem;
+    const flavorCacheRef = yield* SynchronizedRef.make(new Map<string, GeminiAcpFlavor>());
 
     const checkProvider = checkGeminiProviderStatus().pipe(
       Effect.provideService(ServerSettingsService, serverSettings),
@@ -521,6 +560,7 @@ export const GeminiProviderLive = Layer.effect(
             discoverGeminiCapabilitiesViaAcp({
               geminiSettings: settings,
               existingModels: snapshot.models,
+              flavorCacheRef,
             }).pipe(Effect.timeout(GEMINI_ACP_DISCOVERY_TIMEOUT)),
           );
           if (Exit.isFailure(discoveryExit)) {
@@ -529,7 +569,7 @@ export const GeminiProviderLive = Layer.effect(
             });
             return;
           }
-          const enriched = discoveryExit.value;
+          const enriched: ReadonlyArray<ServerProviderModel> = discoveryExit.value;
           if (enriched.length === 0) return;
           yield* publishSnapshot({
             ...snapshot,

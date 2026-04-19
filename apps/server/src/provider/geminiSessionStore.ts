@@ -323,7 +323,7 @@ export const resolveGeminiChatFile = (input: {
       }
     }
 
-    const tmpRoot = nodePath.join(home, "tmp");
+    const tmpRoot = nodePath.join(home, ".gemini", "tmp");
     const tmpExists = yield* fs.exists(tmpRoot).pipe(Effect.orElseSucceed(() => false));
     if (!tmpExists) {
       return undefined;

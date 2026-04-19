@@ -1,11 +1,14 @@
 import * as nodePath from "node:path";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as nodeOs from "node:os";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import { it as effectIt } from "@effect/vitest";
 import { Effect, FileSystem, SynchronizedRef } from "effect";
+import { ChildProcessSpawner } from "effect/unstable/process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -17,7 +20,9 @@ import {
   findGeminiThinkingConfigOption,
   GEMINI_RESERVED_FLAGS,
   type GeminiAcpFlavor,
+  initializeGeminiCliHome,
   resolveCachedGeminiFlavor,
+  resolveGeminiAcpFlavor,
   resolveGeminiAcpConfigUpdates,
   resolveGeminiAuthMethod,
   resolveGeminiAuthMethodFromDisk,
@@ -27,6 +32,39 @@ import {
   validateGeminiLaunchArgs,
   writeGeminiCliSettings,
 } from "./GeminiAcpSupport.ts";
+
+const __dirname = nodePath.dirname(fileURLToPath(import.meta.url));
+const geminiMockAgentPath = nodePath.join(__dirname, "../../../scripts/gemini-acp-mock-agent.ts");
+
+async function makeGeminiAcpWrapper(input: {
+  readonly argvLogPath: string;
+  readonly supportedFlavor: GeminiAcpFlavor;
+}) {
+  const dir = await mkdtemp(nodePath.join(nodeOs.tmpdir(), "t3code-gemini-acp-flavor-"));
+  const wrapperPath = nodePath.join(dir, "fake-gemini.sh");
+  const script = `#!/bin/sh
+printf '%s\t' "$@" >> ${JSON.stringify(input.argvLogPath)}
+printf '\n' >> ${JSON.stringify(input.argvLogPath)}
+for arg in "$@"; do
+  if [ "$arg" = "--${input.supportedFlavor}" ]; then
+    exec ${JSON.stringify("bun")} ${JSON.stringify(geminiMockAgentPath)} "$@"
+  fi
+done
+exit 9
+`;
+  await writeFile(wrapperPath, script, "utf8");
+  await chmod(wrapperPath, 0o755);
+  return wrapperPath;
+}
+
+async function readArgvLog(filePath: string) {
+  const raw = await readFile(filePath, "utf8");
+  return raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => line.split("\t").filter((token) => token.length > 0));
+}
 
 describe("validateGeminiLaunchArgs", () => {
   it("accepts undefined, null, and empty strings", () => {
@@ -328,8 +366,8 @@ effectIt.layer(NodeServices.layer)("seedGeminiCliHomeAuth", (it) => {
 
       const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-gemini-seed-dest-" });
       const seeded = yield* seedGeminiCliHomeAuth({ home, userHomeDir });
-      expect([...seeded].sort()).toEqual(
-        ["google_accounts.json", "installation_id", "oauth_creds.json"].sort(),
+      expect([...seeded].toSorted()).toEqual(
+        ["google_accounts.json", "installation_id", "oauth_creds.json"].toSorted(),
       );
 
       const destGemini = nodePath.join(home, ".gemini");
@@ -699,6 +737,72 @@ describe("resolveCachedGeminiFlavor", () => {
       expect(second).toBe("experimental-acp");
       expect(third).toBe("acp");
       expect(probedPaths).toEqual(["/usr/bin/gemini", "/opt/gemini/gemini"]);
+    }),
+  );
+
+  effectIt("does not cache a failed probe result", () =>
+    Effect.gen(function* () {
+      const cacheRef = yield* SynchronizedRef.make(new Map<string, GeminiAcpFlavor>());
+      let attempts = 0;
+
+      const failed = resolveCachedGeminiFlavor({
+        cacheRef,
+        binaryPath: "/usr/bin/gemini",
+        probe: Effect.sync<GeminiAcpFlavor>(() => {
+          attempts += 1;
+          throw new Error("probe failed");
+        }),
+      });
+
+      const firstExit = yield* Effect.exit(failed);
+      expect(firstExit._tag).toBe("Failure");
+
+      const second = yield* resolveCachedGeminiFlavor({
+        cacheRef,
+        binaryPath: "/usr/bin/gemini",
+        probe: Effect.sync<GeminiAcpFlavor>(() => {
+          attempts += 1;
+          return "experimental-acp";
+        }),
+      });
+
+      expect(second).toBe("experimental-acp");
+      expect(attempts).toBe(2);
+    }),
+  );
+});
+
+effectIt.layer(NodeServices.layer)("resolveGeminiAcpFlavor", (it) => {
+  it.effect("selects the supported ACP flavor instead of guessing a default", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const probeHome = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-gemini-probe-home-" });
+      const argvLogPath = nodePath.join(probeHome, "argv.txt");
+      yield* fs.writeFileString(argvLogPath, "");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeGeminiAcpWrapper({
+          argvLogPath,
+          supportedFlavor: "experimental-acp",
+        }),
+      );
+
+      yield* initializeGeminiCliHome({ home: probeHome });
+
+      const result = yield* resolveGeminiAcpFlavor({
+        childProcessSpawner,
+        geminiSettings: {
+          binaryPath: wrapperPath,
+          launchArgs: "",
+        },
+        cwd: process.cwd(),
+        home: probeHome,
+      });
+
+      expect(result.flavor).toBe("experimental-acp");
+      const argvLog = yield* Effect.promise(() => readArgvLog(argvLogPath));
+      expect(argvLog.filter((argv) => argv.includes("--acp"))).toHaveLength(1);
+      expect(argvLog.filter((argv) => argv.includes("--experimental-acp"))).toHaveLength(1);
     }),
   );
 });

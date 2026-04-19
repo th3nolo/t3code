@@ -272,6 +272,20 @@ export const seedGeminiCliHomeAuth = (input: {
     return seeded;
   });
 
+export const initializeGeminiCliHome = (input: {
+  readonly home: string;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly userHomeDir?: string;
+}) =>
+  Effect.gen(function* () {
+    const settingsPath = yield* writeGeminiCliSettings(input);
+    const seededAuthFiles = yield* seedGeminiCliHomeAuth(input);
+    return {
+      settingsPath,
+      seededAuthFiles,
+    } as const;
+  });
+
 export interface GeminiAcpSpawnOverrides {
   readonly home?: string;
   readonly includeDirectories?: ReadonlyArray<string>;
@@ -322,7 +336,7 @@ export function buildGeminiAcpSpawnInput(input: {
   // HOME/USERPROFILE go last so per-thread home routing always wins.
   const env: Record<string, string> = {
     ...GEMINI_KEYRING_NEUTRALIZING_ENV,
-    ...(input.overrides?.env ?? {}),
+    ...input.overrides?.env,
   };
   if (input.overrides?.home) {
     // Gemini CLI resolves its config directory as `$HOME/.gemini/` (and
@@ -648,11 +662,19 @@ export function buildGeminiCapabilitiesFromConfigOptions(
   const contextOption = findGeminiContextConfigOption(configOptions);
   const contextWindowOptions =
     contextOption && contextOption.type === "select"
-      ? flattenGeminiSessionConfigSelectOptions(contextOption).map((entry) => ({
-          value: entry.value,
-          label: entry.name,
-          ...(contextOption.currentValue === entry.value ? { isDefault: true } : {}),
-        }))
+      ? flattenGeminiSessionConfigSelectOptions(contextOption).map((entry) => {
+          if (contextOption.currentValue === entry.value) {
+            return {
+              value: entry.value,
+              label: entry.name,
+              isDefault: true,
+            };
+          }
+          return {
+            value: entry.value,
+            label: entry.name,
+          };
+        })
       : [];
 
   const thinkingOption = findGeminiThinkingConfigOption(configOptions);

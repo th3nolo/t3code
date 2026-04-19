@@ -340,7 +340,7 @@ effectIt.layer(NodeServices.layer)("chat file helpers", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-gemini-home-" });
-        const rel = "tmp/chats/session.json";
+        const rel = ".gemini/tmp/chats/session.json";
         const abs = nodePath.join(home, rel);
         yield* fs.makeDirectory(nodePath.dirname(abs), { recursive: true });
         writeFileSync(abs, JSON.stringify({ sessionId: "sess-1", messages: [] }), "utf8");
@@ -362,7 +362,7 @@ effectIt.layer(NodeServices.layer)("chat file helpers", (it) => {
       const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-gemini-home-" });
       // Gemini nests chat files under tmp/<project-hash>/chats/<id>.json so
       // the internal filter requires at least one intermediate segment.
-      const chatDir = nodePath.join(home, "tmp", "project-xyz", "chats");
+      const chatDir = nodePath.join(home, ".gemini", "tmp", "project-xyz", "chats");
       yield* fs.makeDirectory(chatDir, { recursive: true });
       const chatPath = nodePath.join(chatDir, "candidate.json");
       writeFileSync(
