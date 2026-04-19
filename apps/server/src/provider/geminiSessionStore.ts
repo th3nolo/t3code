@@ -41,8 +41,6 @@ const decodeGeminiChatEnvelope = Schema.decodeUnknownEffect(
   Schema.fromJsonString(GeminiChatEnvelope),
 );
 
-const decodeGeminiChatEnvelopeValue = Schema.decodeUnknownEffect(GeminiChatEnvelope);
-
 export function parseGeminiResumeCursor(raw: unknown): GeminiResumeCursor | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return undefined;
@@ -175,6 +173,27 @@ export function makeInitialGeminiMetadata(input: {
 }
 
 /**
+ * Decide whether persisted metadata is safe to reuse for the incoming
+ * session-start request.
+ *
+ * - **Resume path (`resumeSessionId` defined):** we require the persisted
+ *   sessionId to exactly match. Reusing metadata that points at a
+ *   different session would attribute turns to the wrong thread.
+ * - **Fresh-start path (`resumeSessionId` undefined):** we accept
+ *   persisted metadata optimistically. `afterSessionCreated` reconciles
+ *   against the real ACP session id; if it diverges, metadata is reset
+ *   to a fresh snapshot before any turn runs.
+ */
+export function canReusePersistedGeminiMetadata(
+  persistedMetadata: GeminiSessionMetadata | undefined,
+  resumeSessionId: string | undefined,
+): boolean {
+  if (persistedMetadata === undefined) return false;
+  if (resumeSessionId === undefined) return true;
+  return persistedMetadata.sessionId === resumeSessionId;
+}
+
+/**
  * Replace `chatFileRelativePath` if it differs (or is currently absent). Returns
  * the input metadata unchanged when the value already matches, so callers can
  * skip the persist step.
@@ -230,13 +249,25 @@ export const truncatePersistedGeminiMessages = (input: {
 }) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    // Parse the raw JSON once, then validate the parsed value matches our
-    // envelope shape (surfacing corrupted chat files early). Working off the
-    // raw object preserves unknown fields like `metadata` or `model` through
-    // the round-trip — schema-decoding would strip them.
+    // Parse the raw JSON and shape-check it. We deliberately work off the
+    // raw object (not the schema-decoded value) so unknown fields like
+    // `metadata` or `model` survive the round-trip — schema decoding
+    // would strip them. JSON.parse can legally return arrays or scalars;
+    // narrow to a record before casting.
     const raw = yield* fs.readFileString(input.chatFilePath);
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    yield* decodeGeminiChatEnvelopeValue(parsed);
+    const parsedUnknown: unknown = JSON.parse(raw);
+    if (
+      typeof parsedUnknown !== "object" ||
+      parsedUnknown === null ||
+      Array.isArray(parsedUnknown)
+    ) {
+      return yield* Effect.die(
+        new Error(
+          `Gemini chat file ${input.chatFilePath} is not a JSON object (got ${Array.isArray(parsedUnknown) ? "array" : typeof parsedUnknown}).`,
+        ),
+      );
+    }
+    const parsed = parsedUnknown as Record<string, unknown>;
     const messages = Array.isArray(parsed["messages"]) ? parsed["messages"] : [];
     const nextMessageCount = Math.max(0, Math.trunc(input.messageCount));
     const nextMessages = messages.slice(0, nextMessageCount);
@@ -248,6 +279,21 @@ export const truncatePersistedGeminiMessages = (input: {
     );
     return nextMessages.length;
   });
+
+/**
+ * Relative path (under the per-thread Gemini home) where Gemini CLI
+ * persists chat files. The CLI writes them to `$HOME/.gemini/tmp/`
+ * followed by a per-session UUID dir and a `chats/` subdir:
+ *
+ *   $HOME/.gemini/tmp/<session-uuid>/chats/<timestamp>.json
+ *
+ * This is **not a public contract** — it's the Gemini CLI package's
+ * internal layout as of April 2026 (gemini CLI ≈ v0.x). The
+ * chat-file resolution logic below scans for `<anything>/chats/*.json`
+ * under `tmp/`; if a future CLI release restructures this, resume +
+ * rollback will silently no-op until we update the pattern.
+ */
+const GEMINI_CLI_CHATS_DIR_SEGMENT = `${nodePath.sep}chats${nodePath.sep}`;
 
 export const resolveGeminiChatFile = (input: {
   readonly home: string;
@@ -289,9 +335,20 @@ export const resolveGeminiChatFile = (input: {
     const candidatePaths = uniqueAbsolutePaths(
       entries
         .filter((entry) => entry.endsWith(".json"))
-        .filter((entry) => entry.includes(`${nodePath.sep}chats${nodePath.sep}`))
+        .filter((entry) => entry.includes(GEMINI_CLI_CHATS_DIR_SEGMENT))
         .map((entry) => nodePath.resolve(tmpRoot, entry)),
     );
+
+    if (entries.length > 0 && candidatePaths.length === 0) {
+      // tmp/ has content but nothing under */chats/* — likely a Gemini
+      // CLI release that restructured the layout. Surface early so
+      // resume-with-truncate failures aren't silent.
+      yield* Effect.logWarning(
+        "Gemini CLI tmp/ directory has entries but no */chats/*.json matches; " +
+          "chat-file resolution may be out of date with the installed CLI.",
+        { tmpRoot, entryCount: entries.length },
+      );
+    }
 
     for (const candidatePath of candidatePaths) {
       const candidate = yield* readGeminiChatEnvelope(candidatePath).pipe(Effect.option);

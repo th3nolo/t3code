@@ -186,9 +186,12 @@ export interface AcpAdapterBaseConfig<TProvider extends ProviderKind, TExtra> {
   readonly registerExtensionHandlers?: (context: ExtensionHandlerContext) => Effect.Effect<void>;
 
   /**
-   * Apply mode + model to the ACP session. Called after session start
-   * and before each turn. Cursor routes everything through
-   * setConfigOption; Gemini uses session/set_mode + session/set_model.
+   * Apply mode + model to the ACP session. Called after the session
+   * context is built on session start and again before each turn.
+   * Cursor routes everything through setConfigOption; Gemini uses
+   * session/set_mode + session/set_model. Receives `extra` so providers
+   * can cache last-applied values directly on the session context and
+   * skip redundant RPCs without maintaining out-of-band maps.
    */
   readonly applySessionConfiguration: (input: {
     readonly acp: AcpSessionRuntimeShape;
@@ -197,6 +200,7 @@ export interface AcpAdapterBaseConfig<TProvider extends ProviderKind, TExtra> {
     readonly interactionMode: ProviderInteractionMode | undefined;
     readonly modelSelection: ModelSelection | undefined;
     readonly threadId: ThreadId;
+    readonly extra: TExtra;
   }) => Effect.Effect<void, ProviderAdapterError>;
 
   /** Optional: resolve the model string that will be recorded in the session. */
@@ -352,10 +356,17 @@ export function isPlanMode(mode: AcpSessionMode, planAliases: ReadonlyArray<stri
 
 // ── factory ────────────────────────────────────────────────────────────
 
+export type AcpAdapterBaseShape<TProvider extends ProviderKind> =
+  ProviderAdapterShape<ProviderAdapterError> & { readonly provider: TProvider };
+
 export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
   config: AcpAdapterBaseConfig<TProvider, TExtra>,
   liveOptions?: AcpAdapterLiveOptions,
-) {
+): Effect.Effect<
+  AcpAdapterBaseShape<TProvider>,
+  never,
+  FileSystem.FileSystem | ServerConfig | ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
+> {
   return Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     const serverConfig = yield* Effect.service(ServerConfig);
@@ -565,6 +576,13 @@ export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
             );
 
           // Wire permission handling + any provider-specific extensions.
+          // Handlers are registered before `acp.start()` so the child
+          // never sees an unhandled request. The `ctx?.` checks below
+          // guard a narrow race: extension notifications can arrive
+          // between the child spawn and ctx construction, in which case
+          // we correctly emit events without an activeTurnId (there is
+          // no active turn yet). Once ctx is populated the chains are
+          // no-ops.
           yield* Effect.gen(function* () {
             if (config.registerExtensionHandlers) {
               yield* config.registerExtensionHandlers({
@@ -657,15 +675,6 @@ export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
               ),
             );
 
-          yield* config.applySessionConfiguration({
-            acp,
-            sessionId: started.sessionId,
-            runtimeMode: input.runtimeMode,
-            interactionMode: undefined,
-            modelSelection: input.modelSelection,
-            threadId: input.threadId,
-          });
-
           const now = yield* nowIso;
           const sessionModel = config.resolveSessionModel?.(input.modelSelection);
           const session: ProviderSession = {
@@ -696,6 +705,19 @@ export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
             extra,
             cancelSignal: undefined,
           };
+
+          // Apply mode/model after ctx is built so the hook can read and
+          // write last-applied state on ctx.extra without maintaining an
+          // out-of-band threadId keyed cache.
+          yield* config.applySessionConfiguration({
+            acp,
+            sessionId: started.sessionId,
+            runtimeMode: input.runtimeMode,
+            interactionMode: undefined,
+            modelSelection: input.modelSelection,
+            threadId: input.threadId,
+            extra: ctx.extra,
+          });
 
           if (config.afterSessionCreated) {
             const result = yield* config.afterSessionCreated(ctx);
@@ -846,6 +868,7 @@ export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
           interactionMode: input.interactionMode,
           modelSelection: input.modelSelection,
           threadId: input.threadId,
+          extra: ctx.extra,
         });
 
         ctx.activeTurnId = turnId;
@@ -965,9 +988,10 @@ export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
           }
 
           ctx.turns.push({ id: turnId, items: [{ prompt: promptParts }] });
+          ctx.activeTurnId = undefined;
           ctx.session = {
             ...ctx.session,
-            activeTurnId: turnId,
+            activeTurnId: undefined,
             updatedAt: yield* nowIso,
             ...(turnModel !== undefined ? { model: turnModel } : {}),
           };
@@ -1003,9 +1027,10 @@ export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
         }
 
         ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
+        ctx.activeTurnId = undefined;
         ctx.session = {
           ...ctx.session,
-          activeTurnId: turnId,
+          activeTurnId: undefined,
           updatedAt: yield* nowIso,
           ...(turnModel !== undefined ? { model: turnModel } : {}),
         };

@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   appendGeminiTurn,
+  canReusePersistedGeminiMetadata,
   countPersistedGeminiMessages,
   GEMINI_SESSION_SCHEMA_VERSION,
   makeGeminiTurnRecord,
@@ -164,6 +165,26 @@ describe("withGeminiChatFileRelativePath", () => {
     const second = withGeminiChatFileRelativePath(first, "tmp/chats/new.json");
     expect(second.chatFileRelativePath).toBe("tmp/chats/new.json");
     expect(second).not.toBe(first);
+  });
+});
+
+describe("canReusePersistedGeminiMetadata", () => {
+  const metadata = makeInitialGeminiMetadata({ sessionId: "session-A" });
+
+  it("returns false when there is no persisted metadata", () => {
+    expect(canReusePersistedGeminiMetadata(undefined, undefined)).toBe(false);
+    expect(canReusePersistedGeminiMetadata(undefined, "session-A")).toBe(false);
+  });
+
+  it("accepts persisted metadata on a fresh start (no resumeSessionId)", () => {
+    // afterSessionCreated reconciles if the sessionId turns out to
+    // mismatch, so fresh-start optimism is safe here.
+    expect(canReusePersistedGeminiMetadata(metadata, undefined)).toBe(true);
+  });
+
+  it("requires exact sessionId match on resume", () => {
+    expect(canReusePersistedGeminiMetadata(metadata, "session-A")).toBe(true);
+    expect(canReusePersistedGeminiMetadata(metadata, "session-B")).toBe(false);
   });
 });
 

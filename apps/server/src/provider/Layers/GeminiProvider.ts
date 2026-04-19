@@ -178,7 +178,7 @@ export const checkGeminiProviderStatus = Effect.fn("checkGeminiProviderStatus")(
   function* (): Effect.fn.Return<
     ServerProvider,
     ServerSettingsError,
-    ChildProcessSpawner.ChildProcessSpawner | ServerSettingsService
+    ChildProcessSpawner.ChildProcessSpawner | ServerSettingsService | FileSystem.FileSystem
   > {
     const geminiSettings = yield* Effect.service(ServerSettingsService).pipe(
       Effect.flatMap((service) => service.getSettings),
@@ -288,7 +288,7 @@ export const checkGeminiProviderStatus = Effect.fn("checkGeminiProviderStatus")(
       });
     }
 
-    const authMethod = resolveGeminiAuthMethod();
+    const authMethod = yield* resolveGeminiAuthMethod();
     const auth = geminiAuthLabel(authMethod);
     const unauthenticatedMessage =
       auth.status !== "authenticated"
@@ -357,7 +357,7 @@ const withGeminiAcpProbe = <A, E, R>(input: {
       cwd: process.cwd(),
       home: probeHome,
       clientInfo: { name: "t3-code-gemini-provider-probe", version: "0.0.0" },
-      authMethodId: resolveGeminiAuthMethod() ?? "oauth-personal",
+      authMethodId: (yield* resolveGeminiAuthMethod()) ?? "oauth-personal",
     });
     return yield* input.useRuntime(runtime);
   }).pipe(Effect.scoped);
@@ -425,10 +425,7 @@ export const discoverGeminiCapabilitiesViaAcp = (input: {
             (modelChoice) => {
               const modelSlug = modelChoice.value.trim();
               if (!modelSlug || !targetSlugs.has(modelSlug) || capabilitiesBySlug.has(modelSlug)) {
-                // The TS47 "use Effect.void" hint is intentionally not
-                // applied: the closure return type must stay
-                // `[string, ModelCapabilities] | undefined` so the outer
-                // forEach result can be filtered with `entry !== undefined`.
+                // Not Effect.void — outer forEach filters on `entry !== undefined`.
                 return Effect.succeed<readonly [string, ModelCapabilities] | undefined>(undefined);
               }
               return withGeminiAcpProbe({
@@ -494,6 +491,7 @@ export const GeminiProviderLive = Layer.effect(
     const checkProvider = checkGeminiProviderStatus().pipe(
       Effect.provideService(ServerSettingsService, serverSettings),
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
     );
 
     return yield* makeManagedServerProvider<GeminiSettings>({

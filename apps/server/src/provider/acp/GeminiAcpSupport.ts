@@ -1,4 +1,3 @@
-import * as nodeFs from "node:fs";
 import * as nodeOs from "node:os";
 import * as nodePath from "node:path";
 
@@ -81,6 +80,15 @@ export const GEMINI_DEFAULT_CLI_SETTINGS: Omit<GeminiCliSettingsJson, "security"
   },
 };
 
+/**
+ * Tokenize a shell-ish argument string into argv, honouring single- and
+ * double-quoted spans plus backslash escapes. We can't use the shared
+ * `parseCliArgs` here because that helper splits on bare whitespace and
+ * would shred quoted arguments like `--foo "hello world"` into three
+ * separate tokens. Scope is intentionally narrow — enough to round-trip
+ * the things users actually type in the Gemini launchArgs settings field
+ * (flags + quoted values) without introducing a full POSIX parser.
+ */
 function splitShellWords(raw: string): ReadonlyArray<string> {
   const tokens = raw.match(/"[^"]*"|'[^']*'|\\.|[^\s]+/g) ?? [];
   return tokens
@@ -118,9 +126,7 @@ export function resolveGeminiUserLaunchArgs(
   if (!trimmed) {
     return { argv: [], error: undefined };
   }
-  const argv = splitShellWords(trimmed);
-  parseCliArgs(argv);
-  return { argv, error: undefined };
+  return { argv: splitShellWords(trimmed), error: undefined };
 }
 
 export function resolveGeminiAuthMethodFromEnv(
@@ -150,38 +156,36 @@ export function resolveGeminiAuthMethodFromEnv(
  * set `GOOGLE_GENAI_USE_GCA` — so we fall back to a cheap stat of the
  * standard credential files.
  */
-export function resolveGeminiAuthMethodFromDisk(input?: {
+export const resolveGeminiAuthMethodFromDisk = (input?: {
   readonly homeDir?: string;
-}): GeminiAuthType | undefined {
-  const homeDir = input?.homeDir ?? nodeOs.homedir();
-  if (!homeDir) return undefined;
-  const geminiHome = nodePath.join(homeDir, ".gemini");
-  const oauthCredsPath = nodePath.join(geminiHome, "oauth_creds.json");
-  try {
-    const stat = nodeFs.statSync(oauthCredsPath);
-    if (stat.isFile() && stat.size > 0) {
-      return "oauth-personal";
-    }
-  } catch {
-    // Ignore ENOENT / EACCES — no usable creds on disk.
-  }
-  return undefined;
-}
+}): Effect.Effect<GeminiAuthType | undefined, never, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const homeDir = input?.homeDir ?? nodeOs.homedir();
+    if (!homeDir) return undefined;
+    const fs = yield* FileSystem.FileSystem;
+    const oauthCredsPath = nodePath.join(homeDir, ".gemini", "oauth_creds.json");
+    const stat = yield* fs.stat(oauthCredsPath).pipe(Effect.option);
+    if (stat._tag !== "Some") return undefined;
+    const info = stat.value;
+    return info.type === "File" && info.size > 0n ? "oauth-personal" : undefined;
+  });
 
 /**
  * Combined resolver that tries env first (fast path for API-key / Vertex /
  * compute-ADC) and then falls back to on-disk credentials (the common
  * `gemini auth login` case).
  */
-export function resolveGeminiAuthMethod(input?: {
+export const resolveGeminiAuthMethod = (input?: {
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly homeDir?: string;
-}): GeminiAuthType | undefined {
-  return (
-    resolveGeminiAuthMethodFromEnv(input?.env ?? process.env) ??
-    resolveGeminiAuthMethodFromDisk(input?.homeDir !== undefined ? { homeDir: input.homeDir } : {})
-  );
-}
+}): Effect.Effect<GeminiAuthType | undefined, never, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fromEnv = resolveGeminiAuthMethodFromEnv(input?.env ?? process.env);
+    if (fromEnv !== undefined) return fromEnv;
+    return yield* resolveGeminiAuthMethodFromDisk(
+      input?.homeDir !== undefined ? { homeDir: input.homeDir } : {},
+    );
+  });
 
 /**
  * Write our locked-down `settings.json` into the per-thread Gemini home.
@@ -200,7 +204,7 @@ export const writeGeminiCliSettings = (input: {
     const geminiDir = nodePath.join(input.home, ".gemini");
     yield* fs.makeDirectory(geminiDir, { recursive: true });
     const settingsPath = nodePath.join(geminiDir, "settings.json");
-    const selectedType = resolveGeminiAuthMethod({
+    const selectedType = yield* resolveGeminiAuthMethod({
       ...(input.env ? { env: input.env } : {}),
       ...(input.userHomeDir !== undefined ? { homeDir: input.userHomeDir } : {}),
     });
@@ -450,17 +454,6 @@ export const resolveCachedGeminiFlavor = <E, R>(input: {
     });
   });
 
-export function getGeminiSessionModels(
-  response:
-    | EffectAcpSchema.LoadSessionResponse
-    | EffectAcpSchema.NewSessionResponse
-    | EffectAcpSchema.ResumeSessionResponse
-    | null
-    | undefined,
-): EffectAcpSchema.SessionModelState | undefined {
-  return response?.models ?? undefined;
-}
-
 // ── ACP session config-option helpers ────────────────────────────────────
 // These mirror CursorAcpSupport / CursorProvider helpers but keyed on
 // Gemini-shaped option ids/categories. Gemini CLI may expose a different
@@ -540,18 +533,30 @@ export function findGeminiModelConfigOption(
   );
 }
 
+/**
+ * Fuzzy keyword match against a session config option's id and name.
+ * Returns `"exact"` when id or name equals a keyword verbatim, `"fuzzy"`
+ * when a keyword appears as a substring, and `undefined` when nothing
+ * matches. Callers prefer exact matches; fuzzy matches are our hedge
+ * against Gemini CLI renaming options between releases and are a
+ * known-fragile seam — a TODO-level debug log when `"fuzzy"` fires
+ * would make drift visible but requires threading an Effect context
+ * through this pure helper, deferred until a broader capability-probe
+ * refactor.
+ */
 function matchesKeyword(
   option: EffectAcpSchema.SessionConfigOption,
   keywords: ReadonlyArray<string>,
-): boolean {
+): "exact" | "fuzzy" | undefined {
   const id = option.id.trim().toLowerCase();
   const name = option.name.trim().toLowerCase();
   for (const keyword of keywords) {
-    if (id === keyword || name === keyword || name.includes(keyword) || id.includes(keyword)) {
-      return true;
-    }
+    if (id === keyword || name === keyword) return "exact";
   }
-  return false;
+  for (const keyword of keywords) {
+    if (id.includes(keyword) || name.includes(keyword)) return "fuzzy";
+  }
+  return undefined;
 }
 
 export function findGeminiEffortConfigOption(
@@ -566,7 +571,7 @@ export function findGeminiEffortConfigOption(
         "thinking-budget",
         "thinking_budget",
         "thought-level",
-      ]),
+      ]) !== undefined,
   );
 }
 
@@ -574,7 +579,7 @@ export function findGeminiThinkingConfigOption(
   configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>,
 ): EffectAcpSchema.SessionConfigOption | undefined {
   return configOptions.find((option) => {
-    if (!matchesKeyword(option, ["thinking"])) return false;
+    if (matchesKeyword(option, ["thinking"]) === undefined) return false;
     if (option.type === "boolean") return true;
     if (option.type !== "select") return false;
     const values = new Set(
@@ -590,7 +595,9 @@ export function findGeminiContextConfigOption(
   configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>,
 ): EffectAcpSchema.SessionConfigOption | undefined {
   return configOptions.find(
-    (option) => option.type === "select" && matchesKeyword(option, ["context", "context-window"]),
+    (option) =>
+      option.type === "select" &&
+      matchesKeyword(option, ["context", "context-window"]) !== undefined,
   );
 }
 
@@ -733,32 +740,34 @@ interface GeminiAcpConfigOptionsRuntime {
 /**
  * Issue `session/set_model` for a non-trivial slug. Empty / null /
  * undefined / `"auto"` are no-ops so callers can pass user-picker values
- * unconditionally.
+ * unconditionally. `mapError` defaults to passing through the raw
+ * `AcpError`; callers that wrap in a domain error should provide one.
  */
-export function applyGeminiAcpModel<E>(input: {
+export function applyGeminiAcpModel<E = EffectAcpErrors.AcpError>(input: {
   readonly runtime: GeminiAcpModelRuntime;
   readonly model: string | null | undefined;
-  readonly mapError: (context: GeminiAcpModelErrorContext) => E;
+  readonly mapError?: (context: GeminiAcpModelErrorContext) => E;
 }): Effect.Effect<void, E> {
+  const mapError = input.mapError ?? (({ cause }) => cause as unknown as E);
   return Effect.gen(function* () {
     const trimmed = input.model?.trim();
     if (!trimmed || trimmed === "auto") return;
-    yield* input.runtime
-      .setModel(trimmed)
-      .pipe(Effect.mapError((cause) => input.mapError({ cause })));
+    yield* input.runtime.setModel(trimmed).pipe(Effect.mapError((cause) => mapError({ cause })));
   });
 }
 
 /**
  * Apply thinking/effort/context options via `setConfigOption` based on
  * what Gemini CLI's current ACP session exposes. Unknown options are
- * silently skipped.
+ * silently skipped. `mapError` defaults to passing through the raw
+ * `AcpError`; callers that wrap in a domain error should provide one.
  */
-export function applyGeminiAcpConfigOptions<E>(input: {
+export function applyGeminiAcpConfigOptions<E = EffectAcpErrors.AcpError>(input: {
   readonly runtime: GeminiAcpConfigOptionsRuntime;
   readonly modelOptions: GeminiModelOptions | null | undefined;
-  readonly mapError: (context: GeminiAcpConfigOptionErrorContext) => E;
+  readonly mapError?: (context: GeminiAcpConfigOptionErrorContext) => E;
 }): Effect.Effect<void, E> {
+  const mapError = input.mapError ?? (({ cause }) => cause as unknown as E);
   return Effect.gen(function* () {
     const configUpdates = resolveGeminiAcpConfigUpdates(
       yield* input.runtime.getConfigOptions,
@@ -767,12 +776,12 @@ export function applyGeminiAcpConfigOptions<E>(input: {
     for (const update of configUpdates) {
       yield* input.runtime
         .setConfigOption(update.configId, update.value)
-        .pipe(Effect.mapError((cause) => input.mapError({ cause, configId: update.configId })));
+        .pipe(Effect.mapError((cause) => mapError({ cause, configId: update.configId })));
     }
   });
 }
 
-function nonEmptyEnv(value: string | undefined): boolean {
+function nonEmptyEnv(value: string | undefined): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
@@ -780,6 +789,6 @@ function isTruthyEnv(value: string | undefined): boolean {
   if (!nonEmptyEnv(value)) {
     return false;
   }
-  const normalized = value!.trim().toLowerCase();
+  const normalized = value.trim().toLowerCase();
   return normalized === "1" || normalized === "true" || normalized === "yes";
 }

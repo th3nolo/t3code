@@ -162,21 +162,26 @@ describe("resolveGeminiAuthMethodFromDisk", () => {
     }
   });
 
-  it("returns undefined when no oauth_creds.json exists", () => {
-    expect(resolveGeminiAuthMethodFromDisk({ homeDir })).toBeUndefined();
+  const runFromDisk = (input: Parameters<typeof resolveGeminiAuthMethodFromDisk>[0]) =>
+    Effect.runPromise(
+      resolveGeminiAuthMethodFromDisk(input).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+  it("returns undefined when no oauth_creds.json exists", async () => {
+    expect(await runFromDisk({ homeDir })).toBeUndefined();
   });
 
-  it("returns oauth-personal when oauth_creds.json exists and is non-empty", () => {
+  it("returns oauth-personal when oauth_creds.json exists and is non-empty", async () => {
     const credsPath = nodePath.join(homeDir, ".gemini", "oauth_creds.json");
     writeFileSync(credsPath, JSON.stringify({ access_token: "abc" }), "utf8");
     chmodSync(credsPath, 0o600);
-    expect(resolveGeminiAuthMethodFromDisk({ homeDir })).toBe("oauth-personal");
+    expect(await runFromDisk({ homeDir })).toBe("oauth-personal");
   });
 
-  it("ignores empty oauth_creds.json", () => {
+  it("ignores empty oauth_creds.json", async () => {
     const credsPath = nodePath.join(homeDir, ".gemini", "oauth_creds.json");
     writeFileSync(credsPath, "", "utf8");
-    expect(resolveGeminiAuthMethodFromDisk({ homeDir })).toBeUndefined();
+    expect(await runFromDisk({ homeDir })).toBeUndefined();
   });
 });
 
@@ -195,28 +200,29 @@ describe("resolveGeminiAuthMethod", () => {
     }
   });
 
-  it("prefers env var over disk creds", () => {
+  const runResolve = (input: Parameters<typeof resolveGeminiAuthMethod>[0]) =>
+    Effect.runPromise(resolveGeminiAuthMethod(input).pipe(Effect.provide(NodeServices.layer)));
+
+  it("prefers env var over disk creds", async () => {
     writeFileSync(
       nodePath.join(homeDir, ".gemini", "oauth_creds.json"),
       JSON.stringify({ access_token: "abc" }),
       "utf8",
     );
-    expect(resolveGeminiAuthMethod({ env: { GEMINI_API_KEY: "xyz" }, homeDir })).toBe(
-      "gemini-api-key",
-    );
+    expect(await runResolve({ env: { GEMINI_API_KEY: "xyz" }, homeDir })).toBe("gemini-api-key");
   });
 
-  it("falls back to on-disk OAuth when no env matches", () => {
+  it("falls back to on-disk OAuth when no env matches", async () => {
     writeFileSync(
       nodePath.join(homeDir, ".gemini", "oauth_creds.json"),
       JSON.stringify({ access_token: "abc" }),
       "utf8",
     );
-    expect(resolveGeminiAuthMethod({ env: {}, homeDir })).toBe("oauth-personal");
+    expect(await runResolve({ env: {}, homeDir })).toBe("oauth-personal");
   });
 
-  it("returns undefined when neither env nor disk is configured", () => {
-    expect(resolveGeminiAuthMethod({ env: {}, homeDir })).toBeUndefined();
+  it("returns undefined when neither env nor disk is configured", async () => {
+    expect(await runResolve({ env: {}, homeDir })).toBeUndefined();
   });
 });
 

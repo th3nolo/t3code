@@ -1288,6 +1288,14 @@ cursorInterruptFallbackLayer("CursorAdapterLive interrupt fallback", (it) => {
           assert.equal(completion.payload.stopReason, "cancelled");
         }
 
+        // After the cancelled turn completes, the session's activeTurnId
+        // must be cleared so UI code that reads it between turns doesn't
+        // see a stale turnId pointing at the cancelled turn.
+        const sessionsAfter = yield* adapter.listSessions();
+        const sessionAfter = sessionsAfter.find((s) => String(s.threadId) === String(threadId));
+        assert.isDefined(sessionAfter);
+        assert.isUndefined(sessionAfter?.activeTurnId);
+
         yield* adapter.stopSession(threadId);
         yield* Fiber.interrupt(runtimeEventsFiber);
       }),

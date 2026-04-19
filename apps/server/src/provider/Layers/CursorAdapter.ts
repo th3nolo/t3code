@@ -314,7 +314,7 @@ function makeCursorAdapterEffect(options?: AcpAdapterLiveOptions) {
       options,
     );
 
-    return base as unknown as CursorAdapterShape;
+    return base satisfies CursorAdapterShape;
   });
 }
 
