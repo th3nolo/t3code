@@ -38,7 +38,7 @@ import {
 import { type AcpSessionMode, type AcpSessionModeState } from "../acp/AcpRuntimeModel.ts";
 import { type AcpSessionRuntimeShape } from "../acp/AcpSessionRuntime.ts";
 import {
-  applyGeminiAcpModelSelection,
+  applyGeminiAcpConfigOptions,
   type GeminiAcpFlavor,
   makeGeminiAcpRuntime,
   resolveCachedGeminiFlavor,
@@ -176,13 +176,9 @@ function tolerateOptionalAcpCall(label: string) {
 }
 
 /**
- * Gemini CLI natively implements `session/set_mode`. The shared
- * AcpSessionRuntime.setMode helper routes through
- * `setConfigOption("mode", …)` which Gemini rejects as "Method not
- * found" — use the raw RPC instead.
- *
- * Returns the resolved mode id (or undefined if no mode applies) so the
- * caller can record it in the per-thread "last-applied" cache.
+ * Use raw `session/set_mode`: the shared `AcpSessionRuntime.setMode`
+ * helper routes through `setConfigOption("mode", …)`, which Gemini
+ * rejects as -32601.
  */
 function applyRequestedSessionMode(input: {
   readonly runtime: AcpSessionRuntimeShape;
@@ -210,13 +206,8 @@ function applyRequestedSessionMode(input: {
 }
 
 /**
- * Model selection for Gemini: try the standard `session/set_model` RPC
- * first, then apply thinking/effort/context via `setConfigOption`. Both
- * calls are tolerated — session start never fails because the agent
- * chose to implement one or the other.
- *
- * Returns the resolved (model, configKey) pair so the caller can populate
- * the per-thread cache and skip duplicate RPCs on subsequent turns.
+ * Both calls are tolerated so session start never fails when the agent
+ * implements only one of `session/set_model` or `setConfigOption`.
  */
 function applyRequestedSessionModelSelection(input: {
   readonly runtime: AcpSessionRuntimeShape;
@@ -242,9 +233,8 @@ function applyRequestedSessionModelSelection(input: {
     }
     const configKey = geminiModelOptionsKey(input.modelOptions);
     if (input.lastAppliedConfigKey !== configKey) {
-      yield* applyGeminiAcpModelSelection({
+      yield* applyGeminiAcpConfigOptions({
         runtime: input.runtime,
-        model: undefined,
         modelOptions: input.modelOptions,
         mapError: ({ cause }) => cause,
       }).pipe(
@@ -504,6 +494,9 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
                   }),
               ),
             );
+            // One-shot copy: external `gemini auth login` during a live
+            // session won't propagate until the next startSession.
+            // See seedGeminiCliHomeAuth's JSDoc for the full trade-off.
             yield* seedGeminiCliHomeAuth({ home: threadPaths.home }).pipe(
               Effect.orElseSucceed(() => [] as ReadonlyArray<string>),
             );

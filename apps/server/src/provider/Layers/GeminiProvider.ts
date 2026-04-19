@@ -425,9 +425,10 @@ export const discoverGeminiCapabilitiesViaAcp = (input: {
             (modelChoice) => {
               const modelSlug = modelChoice.value.trim();
               if (!modelSlug || !targetSlugs.has(modelSlug) || capabilitiesBySlug.has(modelSlug)) {
-                // Effect.void can't be used here: the closure must return
+                // The TS47 "use Effect.void" hint is intentionally not
+                // applied: the closure return type must stay
                 // `[string, ModelCapabilities] | undefined` so the outer
-                // forEach result can be filtered downstream.
+                // forEach result can be filtered with `entry !== undefined`.
                 return Effect.succeed<readonly [string, ModelCapabilities] | undefined>(undefined);
               }
               return withGeminiAcpProbe({

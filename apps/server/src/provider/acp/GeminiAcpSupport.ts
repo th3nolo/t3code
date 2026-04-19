@@ -230,6 +230,15 @@ const GEMINI_AUTH_FILES_TO_SEED: ReadonlyArray<string> = [
  *
  * Unknown files are skipped silently — users with API-key-only auth have no
  * oauth_creds.json, and that's fine.
+ *
+ * Limitations: this is a one-shot copy at session start. In-session token
+ * refresh works correctly because Gemini CLI writes the refreshed access
+ * token back into the per-thread `$HOME/.gemini/` it owns. But if the user
+ * runs `gemini auth login` externally (or switches Google accounts) while
+ * a T3 session is live, the per-thread copy goes stale until the next
+ * `startSession` re-seeds it. Symlinking instead of copying does not help:
+ * the CLI's atomic-rename refresh would replace the symlink with a regular
+ * file on the first refresh, producing the same divergence.
  */
 export const seedGeminiCliHomeAuth = (input: {
   readonly home: string;
@@ -458,10 +467,13 @@ export function getGeminiSessionModels(
 // set of options across releases; the helpers use name/id heuristics so
 // we pick up new options without code changes.
 
-export interface GeminiAcpModelSelectionErrorContext {
+export interface GeminiAcpModelErrorContext {
   readonly cause: EffectAcpErrors.AcpError;
-  readonly step: "set-model" | "set-config-option";
-  readonly configId?: string;
+}
+
+export interface GeminiAcpConfigOptionErrorContext {
+  readonly cause: EffectAcpErrors.AcpError;
+  readonly configId: string;
 }
 
 export interface GeminiSessionSelectOption {
@@ -709,45 +721,53 @@ export function resolveGeminiAcpConfigUpdates(
   return updates;
 }
 
-interface GeminiAcpModelSelectionRuntime {
-  readonly getConfigOptions: AcpSessionRuntimeShape["getConfigOptions"];
-  readonly setConfigOption: AcpSessionRuntimeShape["setConfigOption"];
+interface GeminiAcpModelRuntime {
   readonly setModel: AcpSessionRuntimeShape["setModel"];
 }
 
+interface GeminiAcpConfigOptionsRuntime {
+  readonly getConfigOptions: AcpSessionRuntimeShape["getConfigOptions"];
+  readonly setConfigOption: AcpSessionRuntimeShape["setConfigOption"];
+}
+
 /**
- * Set the base Gemini model slug, then apply any thinking/effort/context
- * options via `setConfigOption` based on what Gemini CLI's current ACP
- * session exposes. Unknown options are silently skipped.
+ * Issue `session/set_model` for a non-trivial slug. Empty / null /
+ * undefined / `"auto"` are no-ops so callers can pass user-picker values
+ * unconditionally.
  */
-export function applyGeminiAcpModelSelection<E>(input: {
-  readonly runtime: GeminiAcpModelSelectionRuntime;
+export function applyGeminiAcpModel<E>(input: {
+  readonly runtime: GeminiAcpModelRuntime;
   readonly model: string | null | undefined;
-  readonly modelOptions: GeminiModelOptions | null | undefined;
-  readonly mapError: (context: GeminiAcpModelSelectionErrorContext) => E;
+  readonly mapError: (context: GeminiAcpModelErrorContext) => E;
 }): Effect.Effect<void, E> {
   return Effect.gen(function* () {
     const trimmed = input.model?.trim();
-    if (trimmed && trimmed.length > 0 && trimmed !== "auto") {
-      yield* input.runtime
-        .setModel(trimmed)
-        .pipe(Effect.mapError((cause) => input.mapError({ cause, step: "set-model" })));
-    }
+    if (!trimmed || trimmed === "auto") return;
+    yield* input.runtime
+      .setModel(trimmed)
+      .pipe(Effect.mapError((cause) => input.mapError({ cause })));
+  });
+}
 
+/**
+ * Apply thinking/effort/context options via `setConfigOption` based on
+ * what Gemini CLI's current ACP session exposes. Unknown options are
+ * silently skipped.
+ */
+export function applyGeminiAcpConfigOptions<E>(input: {
+  readonly runtime: GeminiAcpConfigOptionsRuntime;
+  readonly modelOptions: GeminiModelOptions | null | undefined;
+  readonly mapError: (context: GeminiAcpConfigOptionErrorContext) => E;
+}): Effect.Effect<void, E> {
+  return Effect.gen(function* () {
     const configUpdates = resolveGeminiAcpConfigUpdates(
       yield* input.runtime.getConfigOptions,
       input.modelOptions,
     );
     for (const update of configUpdates) {
-      yield* input.runtime.setConfigOption(update.configId, update.value).pipe(
-        Effect.mapError((cause) =>
-          input.mapError({
-            cause,
-            step: "set-config-option",
-            configId: update.configId,
-          }),
-        ),
-      );
+      yield* input.runtime
+        .setConfigOption(update.configId, update.value)
+        .pipe(Effect.mapError((cause) => input.mapError({ cause, configId: update.configId })));
     }
   });
 }

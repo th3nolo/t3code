@@ -9,7 +9,8 @@ import { Effect, FileSystem, SynchronizedRef } from "effect";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
-  applyGeminiAcpModelSelection,
+  applyGeminiAcpConfigOptions,
+  applyGeminiAcpModel,
   buildGeminiAcpSpawnInput,
   buildGeminiCapabilitiesFromConfigOptions,
   findGeminiEffortConfigOption,
@@ -541,65 +542,82 @@ describe("resolveGeminiAcpConfigUpdates", () => {
   });
 });
 
-describe("applyGeminiAcpModelSelection", () => {
-  it("sets the base model (when non-auto) and then applies each option update", async () => {
-    const calls: Array<
-      | { readonly type: "model"; readonly value: string }
-      | { readonly type: "config"; readonly configId: string; readonly value: string | boolean }
-    > = [];
-
-    const runtime = {
-      getConfigOptions: Effect.succeed(sampleGeminiConfigOptions),
-      setModel: (value: string) =>
-        Effect.sync(() => {
-          calls.push({ type: "model", value });
-        }),
-      setConfigOption: (configId: string, value: string | boolean) =>
-        Effect.sync(() => {
-          calls.push({ type: "config", configId, value });
-        }),
-    };
-
-    await Effect.runPromise(
-      applyGeminiAcpModelSelection({
-        runtime: runtime as unknown as Parameters<
-          typeof applyGeminiAcpModelSelection
-        >[0]["runtime"],
-        model: "gemini-3.1-pro-preview",
-        modelOptions: { thinking: false, effort: "high", contextWindow: "2m" },
-        mapError: ({ step, configId, cause }) =>
-          new Error(
-            step === "set-config-option"
-              ? `failed to set ${configId}: ${cause.message}`
-              : `failed to set model: ${cause.message}`,
-          ),
-      }),
-    );
-
-    expect(calls).toEqual([
-      { type: "model", value: "gemini-3.1-pro-preview" },
-      { type: "config", configId: "effort", value: "high" },
-      { type: "config", configId: "context", value: "2m" },
-      { type: "config", configId: "thinking", value: false },
-    ]);
-  });
-
-  it("omits setModel when the slug is `auto` (lets Gemini CLI pick)", async () => {
+describe("applyGeminiAcpModel", () => {
+  it("issues setModel for a non-trivial slug", async () => {
     const calls: Array<string> = [];
     const runtime = {
-      getConfigOptions: Effect.succeed([] as ReadonlyArray<EffectAcpSchema.SessionConfigOption>),
       setModel: (value: string) =>
         Effect.sync(() => {
           calls.push(`model:${value}`);
         }),
-      setConfigOption: () => Effect.void,
     };
     await Effect.runPromise(
-      applyGeminiAcpModelSelection({
-        runtime: runtime as unknown as Parameters<
-          typeof applyGeminiAcpModelSelection
-        >[0]["runtime"],
+      applyGeminiAcpModel({
+        runtime: runtime as unknown as Parameters<typeof applyGeminiAcpModel>[0]["runtime"],
+        model: "gemini-3.1-pro-preview",
+        mapError: ({ cause }) => new Error(`failed to set model: ${cause.message}`),
+      }),
+    );
+    expect(calls).toEqual(["model:gemini-3.1-pro-preview"]);
+  });
+
+  it("is a no-op when the slug is `auto` (lets Gemini CLI pick)", async () => {
+    const calls: Array<string> = [];
+    const runtime = {
+      setModel: (value: string) =>
+        Effect.sync(() => {
+          calls.push(`model:${value}`);
+        }),
+    };
+    await Effect.runPromise(
+      applyGeminiAcpModel({
+        runtime: runtime as unknown as Parameters<typeof applyGeminiAcpModel>[0]["runtime"],
         model: "auto",
+        mapError: ({ cause }) => new Error(cause.message),
+      }),
+    );
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("applyGeminiAcpConfigOptions", () => {
+  it("applies each option update from the session's exposed configOptions", async () => {
+    const calls: Array<{ readonly configId: string; readonly value: string | boolean }> = [];
+    const runtime = {
+      getConfigOptions: Effect.succeed(sampleGeminiConfigOptions),
+      setConfigOption: (configId: string, value: string | boolean) =>
+        Effect.sync(() => {
+          calls.push({ configId, value });
+        }),
+    };
+
+    await Effect.runPromise(
+      applyGeminiAcpConfigOptions({
+        runtime: runtime as unknown as Parameters<typeof applyGeminiAcpConfigOptions>[0]["runtime"],
+        modelOptions: { thinking: false, effort: "high", contextWindow: "2m" },
+        mapError: ({ configId, cause }) => new Error(`failed to set ${configId}: ${cause.message}`),
+      }),
+    );
+
+    expect(calls).toEqual([
+      { configId: "effort", value: "high" },
+      { configId: "context", value: "2m" },
+      { configId: "thinking", value: false },
+    ]);
+  });
+
+  it("is a no-op when modelOptions is null", async () => {
+    const calls: Array<string> = [];
+    const runtime = {
+      getConfigOptions: Effect.succeed([] as ReadonlyArray<EffectAcpSchema.SessionConfigOption>),
+      setConfigOption: (configId: string, value: string | boolean) =>
+        Effect.sync(() => {
+          calls.push(`${configId}=${String(value)}`);
+        }),
+    };
+    await Effect.runPromise(
+      applyGeminiAcpConfigOptions({
+        runtime: runtime as unknown as Parameters<typeof applyGeminiAcpConfigOptions>[0]["runtime"],
         modelOptions: null,
         mapError: ({ cause }) => new Error(cause.message),
       }),
