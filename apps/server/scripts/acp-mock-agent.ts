@@ -20,6 +20,7 @@ const emitAskQuestion = process.env.T3_ACP_EMIT_ASK_QUESTION === "1";
 const failSetConfigOption = process.env.T3_ACP_FAIL_SET_CONFIG_OPTION === "1";
 const exitOnSetConfigOption = process.env.T3_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
 const promptResponseText = process.env.T3_ACP_PROMPT_RESPONSE_TEXT;
+const hangOnPrompt = process.env.T3_ACP_HANG_ON_PROMPT === "1";
 const sessionId = "mock-session-1";
 
 let currentModeId = "ask";
@@ -294,6 +295,23 @@ const program = Effect.gen(function* () {
   yield* agent.handlePrompt((request) =>
     Effect.gen(function* () {
       const requestedSessionId = String(request.sessionId ?? sessionId);
+
+      if (hangOnPrompt) {
+        // Simulate a Gemini-CLI-style bug: acknowledge the prompt by
+        // emitting a session/update so the caller sees the turn is
+        // actually running, then deliberately never return. Even if a
+        // session/cancel notification arrives (handled above) we stay
+        // blocked here — mirrors the real-world cases where the agent
+        // receives cancel but doesn't terminate the in-flight prompt.
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "mock-hang: not responding" },
+          },
+        });
+        return yield* Effect.never;
+      }
 
       if (emitInterleavedAssistantToolCalls) {
         const toolCallId = "tool-call-1";

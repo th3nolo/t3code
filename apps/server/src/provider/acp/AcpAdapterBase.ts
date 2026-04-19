@@ -29,6 +29,7 @@ import {
 import {
   DateTime,
   Deferred,
+  Duration,
   Effect,
   Exit,
   Fiber,
@@ -94,6 +95,13 @@ export interface BaseAcpSessionContext<TExtra> {
   activeTurnId: TurnId | undefined;
   stopped: boolean;
   readonly extra: TExtra;
+  /**
+   * Deferred signalled by `interruptTurn`'s grace timer to tell
+   * `sendTurn` to synthesize a cancelled `turn.completed` event
+   * without waiting for the real prompt reply. Set in `sendTurn`
+   * before the prompt race; cleared after the race resolves.
+   */
+  cancelSignal: Deferred.Deferred<void> | undefined;
 }
 
 export type EventStamp = { readonly eventId: EventId; readonly createdAt: string };
@@ -252,6 +260,25 @@ export interface AcpAdapterBaseConfig<TProvider extends ProviderKind, TExtra> {
 export interface AcpAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  /**
+   * Maximum time the `session/cancel` notification is allowed to take
+   * before we log a warning and move on. The notification is
+   * fire-and-forget in normal operation (writes to stdout instantly);
+   * this timeout only catches pathological cases (hung child process,
+   * backed-up pipe). Defaults to `"2 seconds"`.
+   */
+  readonly acpCancelTimeout?: Duration.Input;
+  /**
+   * Maximum time `sendTurn` will wait for the agent to naturally
+   * resolve `session/prompt` after a cancel notification has been
+   * sent. If exceeded, `sendTurn` synthesizes a cancelled
+   * `turn.completed` event so the UI can transition out of "running"
+   * state even when the agent's implementation is slow or buggy about
+   * honoring cancel. The real prompt reply, if it ever arrives, is
+   * drained in the background and discarded. Defaults to
+   * `"3 seconds"`.
+   */
+  readonly syntheticCancelGrace?: Duration.Input;
 }
 
 // ── common pure helpers ────────────────────────────────────────────────
@@ -348,6 +375,8 @@ export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
 
     const PROVIDER = config.provider;
     const defaultLogSource = config.defaultLogSource ?? "acp.jsonrpc";
+    const acpCancelTimeout: Duration.Input = liveOptions?.acpCancelTimeout ?? "2 seconds";
+    const syntheticCancelGrace: Duration.Input = liveOptions?.syntheticCancelGrace ?? "3 seconds";
     const autoApprove =
       config.selectAutoApprovedPermission ??
       (({ request, runtimeMode }) =>
@@ -665,6 +694,7 @@ export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
             activeTurnId: undefined,
             stopped: false,
             extra,
+            cancelSignal: undefined,
           };
 
           if (config.afterSessionCreated) {
@@ -826,6 +856,13 @@ export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
           updatedAt: yield* nowIso,
         };
 
+        // Wire up the cancelSignal BEFORE emitting turn.started so that
+        // an interruptTurn racing against the `turn.started` event
+        // always sees the signal. interruptTurn reads ctx.cancelSignal
+        // to schedule the grace timer.
+        const cancelSignal = yield* Deferred.make<void>();
+        ctx.cancelSignal = cancelSignal;
+
         if (config.beforeTurn) {
           yield* config.beforeTurn({
             ctx,
@@ -887,13 +924,75 @@ export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
           });
         }
 
-        const result = yield* ctx.acp
-          .prompt({ prompt: promptParts })
-          .pipe(
-            Effect.mapError((error) =>
-              mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+        // `cancelSignal` was wired up above, before we emitted
+        // `turn.started`, so interruptTurn can always see it. Race the
+        // prompt against the cancelSignal: if the signal fires first,
+        // `raceFirst` interrupts the prompt Effect — client-side we
+        // stop waiting, though the agent may still be processing.
+        // Acceptable trade-off: a late reply lands in the effect-acp
+        // client with no listener and is discarded.
+        type TurnOutcome =
+          | { readonly kind: "natural"; readonly result: EffectAcpSchema.PromptResponse }
+          | { readonly kind: "synthetic-cancel" };
+
+        // `raceFirst` (as opposed to `race`) returns whichever side
+        // completes first, success OR failure. This matters because
+        // stopSession closes the session scope — the prompt Effect
+        // then fails with a transport error, and we need the race to
+        // propagate that failure rather than wait for cancelSignal
+        // (which may never fire).
+        const outcome: TurnOutcome = yield* ctx.acp.prompt({ prompt: promptParts }).pipe(
+          Effect.mapError((error) =>
+            mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+          ),
+          Effect.map((result): TurnOutcome => ({ kind: "natural", result })),
+          Effect.raceFirst(
+            Deferred.await(cancelSignal).pipe(
+              Effect.map((): TurnOutcome => ({ kind: "synthetic-cancel" })),
             ),
-          );
+          ),
+        );
+
+        ctx.cancelSignal = undefined;
+
+        if (outcome.kind === "synthetic-cancel") {
+          if (config.afterTurnSettled) {
+            yield* config.afterTurnSettled({
+              ctx,
+              turnId,
+              stopReason: "cancelled",
+            });
+          }
+
+          ctx.turns.push({ id: turnId, items: [{ prompt: promptParts }] });
+          ctx.session = {
+            ...ctx.session,
+            activeTurnId: turnId,
+            updatedAt: yield* nowIso,
+            ...(turnModel !== undefined ? { model: turnModel } : {}),
+          };
+
+          yield* offerRuntimeEvent({
+            type: "turn.completed",
+            ...(yield* makeEventStamp()),
+            provider: PROVIDER,
+            threadId: input.threadId,
+            turnId,
+            payload: {
+              state: "cancelled",
+              stopReason: "cancelled",
+            },
+          });
+
+          return {
+            threadId: input.threadId,
+            turnId,
+            resumeCursor: ctx.session.resumeCursor,
+          };
+        }
+
+        // Natural branch: race winner provides the real result.
+        const result = outcome.result;
 
         if (config.afterTurnSettled) {
           yield* config.afterTurnSettled({
@@ -935,13 +1034,44 @@ export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
         const ctx = yield* requireSession(threadId);
         yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
         yield* settlePendingUserInputsAsEmptyAnswers(ctx.pendingUserInputs);
-        yield* Effect.ignore(
-          ctx.acp.cancel.pipe(
-            Effect.mapError((error) =>
-              mapAcpToAdapterError(PROVIDER, threadId, "session/cancel", error),
-            ),
+
+        // Fire the cancel notification under a bounded timeout so a
+        // hung child process doesn't keep us waiting on stdin. Log at
+        // warn if anything goes wrong — still non-fatal for the caller.
+        yield* ctx.acp.cancel.pipe(
+          Effect.mapError((error) =>
+            mapAcpToAdapterError(PROVIDER, threadId, "session/cancel", error),
           ),
+          Effect.timeout(acpCancelTimeout),
+          Effect.tapError((error) =>
+            Effect.logWarning("ACP cancel notification failed or timed out", {
+              threadId,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          ),
+          Effect.ignore,
         );
+
+        // If sendTurn is currently awaiting a prompt reply, schedule a
+        // grace timer: after `syntheticCancelGrace`, if the prompt
+        // hasn't already been resolved, fire the cancelSignal so
+        // sendTurn's raceFirst unblocks and synthesizes a cancelled
+        // turn.completed event. This is the whole reason the stop
+        // button actually stops — without it, a slow agent
+        // (most commonly Gemini CLI finishing a long tool call) leaves
+        // the UI spinning indefinitely. The timer is forked into the
+        // session scope so it outlives this interruptTurn call; if the
+        // prompt completes naturally first, the raceFirst has already
+        // won with the natural result and the later Deferred.succeed
+        // is a harmless no-op.
+        const cancelSignal = ctx.cancelSignal;
+        if (cancelSignal) {
+          yield* Effect.sleep(syntheticCancelGrace).pipe(
+            Effect.andThen(Deferred.succeed(cancelSignal, undefined).pipe(Effect.asVoid)),
+            Effect.forkIn(ctx.scope),
+            Effect.asVoid,
+          );
+        }
       });
 
     const respondToRequest: ProviderAdapterShape<ProviderAdapterError>["respondToRequest"] = (

@@ -1202,3 +1202,94 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
     }),
   );
 });
+
+// ── Synthetic cancel / stop-button-hang regression ────────────────────
+// If the agent receives `session/cancel` but doesn't promptly reply to
+// the in-flight `session/prompt` (Gemini CLI sometimes does this for
+// long tool calls), the UI used to hang indefinitely. The base adapter
+// now races the prompt reply against a bounded grace; when the grace
+// elapses, it synthesizes a cancelled turn.completed so the UI can
+// transition out of "running" state. Short grace here so the test
+// completes in ~300ms.
+const cursorInterruptFallbackLayer = it.layer(
+  makeCursorAdapterLive({
+    syntheticCancelGrace: "200 millis",
+    acpCancelTimeout: "500 millis",
+  }).pipe(
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), {
+        prefix: "t3code-cursor-interrupt-fallback-",
+      }),
+    ),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+  // Opt out of @effect/vitest's default TestEnv (which installs
+  // TestClock) so the grace timer's real-time Effect.sleep actually
+  // fires instead of waiting for manual clock adjustment.
+  { excludeTestServices: true },
+);
+
+cursorInterruptFallbackLayer("CursorAdapterLive interrupt fallback", (it) => {
+  it.effect(
+    "synthesizes a cancelled turn.completed when the agent never replies to session/cancel",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CursorAdapter;
+        const settings = yield* ServerSettingsService;
+        const threadId = ThreadId.make("cursor-hang-prompt");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockAgentWrapper({ T3_ACP_HANG_ON_PROMPT: "1" }),
+        );
+        yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+        // Track events: (1) latch `turnStarted` so we know sendTurn has
+        // reached its prompt race (and therefore wired up the
+        // cancelSignal on ctx) before we call interruptTurn,
+        // (2) collect everything for the assertions.
+        const turnStarted = yield* Deferred.make<void>();
+        const eventsRef = { value: [] as Array<ProviderRuntimeEvent> };
+        const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.gen(function* () {
+            eventsRef.value.push(event);
+            if (event.type === "turn.started" && String(event.threadId) === String(threadId)) {
+              yield* Deferred.succeed(turnStarted, undefined).pipe(Effect.ignore);
+            }
+          }),
+        ).pipe(Effect.forkChild);
+
+        yield* adapter.startSession({
+          threadId,
+          provider: "cursor",
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: { provider: "cursor", model: "default" },
+        });
+
+        // Kick off send — the mock hangs on prompt, so sendTurn would
+        // never return without the synthetic-cancel path.
+        const sendFiber = yield* adapter
+          .sendTurn({ threadId, input: "hang please", attachments: [] })
+          .pipe(Effect.forkChild);
+
+        // Wait until sendTurn has entered the prompt race (evidenced
+        // by turn.started), then interrupt.
+        yield* Deferred.await(turnStarted);
+        yield* adapter.interruptTurn(threadId);
+
+        // sendTurn resolves via the synthetic-cancel branch within
+        // grace + handshake time.
+        yield* Fiber.join(sendFiber);
+
+        const completion = eventsRef.value.find((event) => event.type === "turn.completed");
+        assert.isDefined(completion);
+        if (completion?.type === "turn.completed") {
+          assert.equal(completion.payload.state, "cancelled");
+          assert.equal(completion.payload.stopReason, "cancelled");
+        }
+
+        yield* adapter.stopSession(threadId);
+        yield* Fiber.interrupt(runtimeEventsFiber);
+      }),
+  );
+});
