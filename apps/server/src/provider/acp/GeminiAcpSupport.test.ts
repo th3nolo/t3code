@@ -5,7 +5,7 @@ import * as nodeOs from "node:os";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import { it as effectIt } from "@effect/vitest";
-import { Effect, FileSystem } from "effect";
+import { Effect, FileSystem, SynchronizedRef } from "effect";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -15,6 +15,8 @@ import {
   findGeminiEffortConfigOption,
   findGeminiThinkingConfigOption,
   GEMINI_RESERVED_FLAGS,
+  type GeminiAcpFlavor,
+  resolveCachedGeminiFlavor,
   resolveGeminiAcpConfigUpdates,
   resolveGeminiAuthMethod,
   resolveGeminiAuthMethodFromDisk,
@@ -604,4 +606,75 @@ describe("applyGeminiAcpModelSelection", () => {
     );
     expect(calls).toEqual([]);
   });
+});
+
+describe("resolveCachedGeminiFlavor", () => {
+  effectIt("probes once per binary path and reuses the cached flavor", () =>
+    Effect.gen(function* () {
+      const cacheRef = yield* SynchronizedRef.make(new Map<string, GeminiAcpFlavor>());
+      let probeCalls = 0;
+      const probe = Effect.sync<GeminiAcpFlavor>(() => {
+        probeCalls += 1;
+        return "acp";
+      });
+
+      const first = yield* resolveCachedGeminiFlavor({
+        cacheRef,
+        binaryPath: "/usr/bin/gemini",
+        probe,
+      });
+      const second = yield* resolveCachedGeminiFlavor({
+        cacheRef,
+        binaryPath: "/usr/bin/gemini",
+        probe,
+      });
+      const third = yield* resolveCachedGeminiFlavor({
+        cacheRef,
+        binaryPath: "/usr/bin/gemini",
+        probe,
+      });
+
+      expect(first).toBe("acp");
+      expect(second).toBe("acp");
+      expect(third).toBe("acp");
+      expect(probeCalls).toBe(1);
+    }),
+  );
+
+  effectIt("probes separately for different binary paths", () =>
+    Effect.gen(function* () {
+      const cacheRef = yield* SynchronizedRef.make(new Map<string, GeminiAcpFlavor>());
+      const flavorsByPath: Record<string, GeminiAcpFlavor> = {
+        "/usr/bin/gemini": "acp",
+        "/opt/gemini/gemini": "experimental-acp",
+      };
+      const probedPaths: Array<string> = [];
+      const makeProbe = (path: string) =>
+        Effect.sync<GeminiAcpFlavor>(() => {
+          probedPaths.push(path);
+          return flavorsByPath[path] ?? "acp";
+        });
+
+      const first = yield* resolveCachedGeminiFlavor({
+        cacheRef,
+        binaryPath: "/usr/bin/gemini",
+        probe: makeProbe("/usr/bin/gemini"),
+      });
+      const second = yield* resolveCachedGeminiFlavor({
+        cacheRef,
+        binaryPath: "/opt/gemini/gemini",
+        probe: makeProbe("/opt/gemini/gemini"),
+      });
+      const third = yield* resolveCachedGeminiFlavor({
+        cacheRef,
+        binaryPath: "/usr/bin/gemini",
+        probe: makeProbe("/usr/bin/gemini"),
+      });
+
+      expect(first).toBe("acp");
+      expect(second).toBe("experimental-acp");
+      expect(third).toBe("acp");
+      expect(probedPaths).toEqual(["/usr/bin/gemini", "/opt/gemini/gemini"]);
+    }),
+  );
 });

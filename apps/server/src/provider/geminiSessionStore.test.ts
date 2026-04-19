@@ -21,7 +21,7 @@ import {
   truncatePersistedGeminiMessages,
   updateLastGeminiTurnStatus,
   writeGeminiSessionMetadata,
-} from "./GeminiSessionStore.ts";
+} from "./geminiSessionStore.ts";
 
 describe("parseGeminiResumeCursor", () => {
   it("parses a valid cursor", () => {
@@ -212,6 +212,50 @@ effectIt.layer(NodeServices.layer)("chat file helpers", (it) => {
       );
       expect(yield* countPersistedGeminiMessages(chatPath)).toBe(3);
     }),
+  );
+
+  it.effect(
+    "countPersistedGeminiMessages counts every message in a tool-call turn (regression guard for the +2 heuristic bug)",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-gemini-chat-" });
+        const chatPath = nodePath.join(dir, "chat.json");
+        // A real turn with N tool calls produces ~2N+2 messages:
+        // [user prompt, assistant tool call, tool result, assistant tool call,
+        //  tool result, assistant final reply] = 6 messages for 2 tool calls.
+        writeFileSync(
+          chatPath,
+          JSON.stringify({
+            sessionId: "s-tools",
+            messages: [
+              { role: "user", text: "do two things" },
+              { role: "assistant", toolCallId: "t1" },
+              { role: "tool", toolCallId: "t1" },
+              { role: "assistant", toolCallId: "t2" },
+              { role: "tool", toolCallId: "t2" },
+              { role: "assistant", text: "done" },
+            ],
+          }),
+          "utf8",
+        );
+
+        const count = yield* countPersistedGeminiMessages(chatPath);
+        // Not 2 (the old broken heuristic) — 6.
+        expect(count).toBe(6);
+
+        // Rollback to the pre-turn boundary (messageCountBefore = 0)
+        // must strip every message, not just the first two.
+        const remaining = yield* truncatePersistedGeminiMessages({
+          chatFilePath: chatPath,
+          messageCount: 0,
+        });
+        expect(remaining).toBe(0);
+        const afterTruncate = JSON.parse(readFileSync(chatPath, "utf8")) as {
+          messages: ReadonlyArray<unknown>;
+        };
+        expect(afterTruncate.messages).toEqual([]);
+      }),
   );
 
   it.effect("truncatePersistedGeminiMessages slices messages while preserving the envelope", () =>

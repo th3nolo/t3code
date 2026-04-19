@@ -25,6 +25,7 @@ import {
   buildGeminiCapabilitiesFromConfigOptions,
   findGeminiModelConfigOption,
   flattenGeminiSessionConfigSelectOptions,
+  GEMINI_KEYRING_NEUTRALIZING_ENV,
   makeGeminiAcpRuntime,
   resolveGeminiAuthMethod,
   seedGeminiCliHomeAuth,
@@ -329,33 +330,6 @@ function hasGeminiModelCapabilities(model: Pick<ServerProviderModel, "capabiliti
   );
 }
 
-/**
- * Env overrides applied to every capability-probe spawn.
- *
- * The probe runs with an isolated temp HOME, but AcpSessionRuntime spawns the
- * child with `{ ...process.env, ...spawnEnv }` — so DBus / keyring discovery
- * vars leak through. On Linux, that lets anything inside `gemini --acp` (auth
- * flow, google-auth-library, etc.) reach the user's `secret-service` daemon.
- * When the running GNOME Keyring has no default keyring set up yet, it
- * responds by prompting the user to create one ("Choose password for new
- * keyring") — which is what the user saw on server restart.
- *
- * The probe only reads ACP config options; it never needs to persist
- * credentials. Setting these to empty strings makes libsecret / DBus bail
- * cleanly (invalid address → no connection) without affecting the real
- * interactive session path, which still inherits the parent env untouched.
- *
- * No-op on macOS (Keychain doesn't use env-var discovery) and Windows
- * (Credential Manager / DPAPI), so this is Linux-targeted but safe to set
- * everywhere.
- */
-const PROBE_CREDENTIAL_STORE_ENV_OVERRIDES: Readonly<Record<string, string>> = {
-  DBUS_SESSION_BUS_ADDRESS: "",
-  DBUS_SYSTEM_BUS_ADDRESS: "",
-  GNOME_KEYRING_CONTROL: "",
-  GNOME_KEYRING_PID: "",
-};
-
 const withGeminiAcpProbe = <A, E, R>(input: {
   readonly geminiSettings: GeminiSettings;
   readonly useRuntime: (runtime: AcpSessionRuntimeShape) => Effect.Effect<A, E, R>;
@@ -378,7 +352,7 @@ const withGeminiAcpProbe = <A, E, R>(input: {
       home: probeHome,
       clientInfo: { name: "t3-code-gemini-provider-probe", version: "0.0.0" },
       authMethodId: resolveGeminiAuthMethod() ?? "oauth-personal",
-      spawnEnv: PROBE_CREDENTIAL_STORE_ENV_OVERRIDES,
+      spawnEnv: GEMINI_KEYRING_NEUTRALIZING_ENV,
     });
     return yield* input.useRuntime(runtime);
   }).pipe(Effect.scoped);

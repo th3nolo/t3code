@@ -8,7 +8,7 @@ import {
   type ModelCapabilities,
 } from "@t3tools/contracts";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
-import { Cause, Effect, Exit, FileSystem, Layer, Scope } from "effect";
+import { Cause, Effect, Exit, FileSystem, Layer, Scope, SynchronizedRef } from "effect";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import type * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
@@ -415,6 +415,30 @@ export const resolveGeminiAcpFlavor = (input: {
           new Error("Gemini ACP probe failed before any candidate flag was attempted."),
         ) as Cause.Cause<EffectAcpErrors.AcpError>),
     );
+  });
+
+/**
+ * Memoize ACP-flavor detection so a single binary path only pays the
+ * probe cost once. On cache hit, returns immediately. On cache miss,
+ * runs `probe`, stores the result, returns it. The whole operation is
+ * serialized on the `SynchronizedRef` so concurrent first calls probe
+ * once, not N times.
+ */
+export const resolveCachedGeminiFlavor = <E, R>(input: {
+  readonly cacheRef: SynchronizedRef.SynchronizedRef<Map<string, GeminiAcpFlavor>>;
+  readonly binaryPath: string;
+  readonly probe: Effect.Effect<GeminiAcpFlavor, E, R>;
+}): Effect.Effect<GeminiAcpFlavor, E, R> =>
+  SynchronizedRef.modifyEffect(input.cacheRef, (cache) => {
+    const existing = cache.get(input.binaryPath);
+    if (existing) {
+      return Effect.succeed([existing, cache] as const);
+    }
+    return Effect.map(input.probe, (flavor) => {
+      const next = new Map(cache);
+      next.set(input.binaryPath, flavor);
+      return [flavor, next] as const;
+    });
   });
 
 export function getGeminiSessionModels(

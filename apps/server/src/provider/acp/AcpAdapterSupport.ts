@@ -41,6 +41,12 @@ export function mapAcpToAdapterError(
   });
 }
 
+export function isAcpMethodNotFound(
+  error: EffectAcpErrors.AcpError,
+): error is EffectAcpErrors.AcpRequestError {
+  return Schema.is(EffectAcpErrors.AcpRequestError)(error) && error.code === -32601;
+}
+
 export function acpPermissionOutcome(decision: ProviderApprovalDecision): string {
   switch (decision) {
     case "acceptForSession":
