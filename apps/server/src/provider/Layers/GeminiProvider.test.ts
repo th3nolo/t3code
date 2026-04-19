@@ -112,7 +112,9 @@ effectIt.layer(TestLayer)("checkGeminiProviderStatus", (it) => {
         expect(snapshot.enabled).toBe(true);
         expect(snapshot.installed).toBe(true);
         expect(snapshot.status).toBe("warning");
-        expect(snapshot.auth.status).toBe("unknown");
+        // Probe completed and conclusively found no auth — surface that
+        // explicitly so enrichSnapshot's unauthenticated-skip can fire.
+        expect(snapshot.auth.status).toBe("unauthenticated");
         expect(snapshot.message).toContain("gemini auth login");
       } finally {
         if (savedHome !== undefined) {

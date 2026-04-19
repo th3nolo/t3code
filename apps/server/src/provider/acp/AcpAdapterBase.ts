@@ -194,8 +194,17 @@ export interface AcpAdapterBaseConfig<TProvider extends ProviderKind, TExtra> {
   /** Optional: resolve the model string that will be recorded in the session. */
   readonly resolveSessionModel?: (modelSelection: ModelSelection | undefined) => string | undefined;
 
-  /** Optional: run after the session context is first built. Gemini persists metadata here. */
-  readonly afterSessionCreated?: (ctx: BaseAcpSessionContext<TExtra>) => Effect.Effect<void>;
+  /**
+   * Optional: run after the session context is first built. Gemini persists
+   * metadata here. May return an array of turns to seed `ctx.turns` on
+   * resume — this is how providers that maintain their own persisted turn
+   * index keep `readThread` and `rollbackThread` accurate after a process
+   * restart. Items inside each restored turn stay opaque (typically `[]`)
+   * because the protocol doesn't require message bodies for replay.
+   */
+  readonly afterSessionCreated?: (ctx: BaseAcpSessionContext<TExtra>) => Effect.Effect<void | {
+    readonly seedTurns?: ReadonlyArray<{ id: TurnId; items: Array<unknown> }>;
+  }>;
 
   /**
    * Optional: run when a content-delta notification arrives. Gemini uses
@@ -382,6 +391,10 @@ export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
       Effect.gen(function* () {
         if (!nativeEventLogger) return;
         const observedAt = new Date().toISOString();
+        // `source` rides along on the event payload so downstream
+        // consumers can distinguish JSON-RPC notifications from
+        // Cursor-extension notifications without re-deriving from method
+        // names. The base logger preserves arbitrary payload fields.
         yield* nativeEventLogger.write(
           {
             observedAt,
@@ -392,15 +405,11 @@ export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
               createdAt: observedAt,
               method,
               threadId,
-              payload,
+              payload: { source, payload },
             },
           },
           threadId,
         );
-        // Mark `source` as deliberately used for call-site clarity; the
-        // underlying logger currently doesn't partition by source but the
-        // parameter keeps the call sites self-documenting.
-        void source;
       });
 
     const emitPlanUpdate = (
@@ -659,7 +668,10 @@ export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
           };
 
           if (config.afterSessionCreated) {
-            yield* config.afterSessionCreated(ctx);
+            const result = yield* config.afterSessionCreated(ctx);
+            if (result && result.seedTurns && result.seedTurns.length > 0) {
+              ctx.turns.push(...result.seedTurns);
+            }
           }
 
           const nf = yield* Stream.runDrain(
@@ -985,6 +997,13 @@ export function makeAcpAdapter<TProvider extends ProviderKind, TExtra>(
             provider: PROVIDER,
             operation: "rollbackThread",
             issue: "numTurns must be an integer >= 1.",
+          });
+        }
+        if (numTurns > ctx.turns.length) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "rollbackThread",
+            issue: `Cannot roll back ${numTurns} turn(s); thread only has ${ctx.turns.length}.`,
           });
         }
         const nextLength = Math.max(0, ctx.turns.length - numTurns);

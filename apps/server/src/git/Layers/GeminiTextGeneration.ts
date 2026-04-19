@@ -13,7 +13,7 @@
  *
  * @module GeminiTextGeneration
  */
-import { Effect, FileSystem, Layer, Option, Schema, Stream } from "effect";
+import { Effect, FileSystem, Layer, Option, Schema, Stream, SynchronizedRef } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { ChatAttachment, GeminiModelSelection, TextGenerationError } from "@t3tools/contracts";
@@ -111,11 +111,13 @@ function extractJsonObject(raw: string): string {
   return trimmed.slice(start);
 }
 
-interface GeminiJsonDecodeError {
-  readonly _tag: "GeminiJsonDecodeError";
-  readonly detail: string;
-  readonly cause?: unknown;
-}
+class GeminiJsonDecodeError extends Schema.TaggedErrorClass<GeminiJsonDecodeError>()(
+  "GeminiJsonDecodeError",
+  {
+    detail: Schema.String,
+    cause: Schema.optional(Schema.Defect),
+  },
+) {}
 
 const makeGeminiTextGeneration = Effect.gen(function* () {
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -142,6 +144,39 @@ const makeGeminiTextGeneration = Effect.gen(function* () {
     path === undefined
       ? Effect.void
       : fileSystem.remove(path, { recursive: true, force: true }).pipe(Effect.ignore);
+
+  /**
+   * Process-singleton scratch Gemini home shared across every text-gen
+   * call in this Layer. Created lazily on first use, then reused for all
+   * subsequent calls. Cleaned up at Layer shutdown via the finalizer
+   * registered below.
+   *
+   * `writeGeminiCliSettings` and `seedGeminiCliHomeAuth` are both
+   * idempotent and Gemini CLI doesn't lock $HOME/.gemini/, so concurrent
+   * text-gen requests can safely share one home.
+   */
+  const sharedHomeRef = yield* SynchronizedRef.make<string | undefined>(undefined);
+
+  const ensureSharedHome = SynchronizedRef.modifyEffect(sharedHomeRef, (existing) => {
+    if (existing) return Effect.succeed([existing, existing] as const);
+    return Effect.gen(function* () {
+      const home = yield* fileSystem.makeTempDirectory({ prefix: "t3-gemini-textgen-home-" });
+      yield* writeGeminiCliSettings({ home }).pipe(Effect.orElseSucceed(() => home));
+      yield* seedGeminiCliHomeAuth({ home }).pipe(
+        Effect.orElseSucceed(() => [] as ReadonlyArray<string>),
+      );
+      return [home, home] as const;
+    });
+  });
+
+  yield* Effect.addFinalizer(() =>
+    Effect.gen(function* () {
+      const existing = yield* SynchronizedRef.get(sharedHomeRef);
+      if (existing) {
+        yield* removeDirectoryQuietly(existing);
+      }
+    }),
+  );
 
   // Stage attachments under a per-request temp dir and return the directory
   // plus the list of `@{...}` tokens to inject into the prompt so Gemini CLI
@@ -238,11 +273,10 @@ const makeGeminiTextGeneration = Effect.gen(function* () {
         ? (["--model", modelSelection.model] as const)
         : ([] as const);
 
-    // Use a per-request Gemini home so headless text-generation runs can't
-    // collide with interactive sessions. Settings disable checkpointing,
-    // folder-trust, and sandboxing regardless of caller's home. Cleanup is
-    // handled via Effect.ensuring at the return so we don't require Scope.
-    const geminiHome = yield* fileSystem.makeTempDirectory({ prefix: "t3-gemini-home-" }).pipe(
+    // Reuse the process-wide Gemini scratch home initialized at Layer
+    // startup. Avoids ~200-500ms of tempdir creation, settings.json
+    // write, and oauth_creds.json copy per text-gen call.
+    const geminiHome = yield* ensureSharedHome.pipe(
       Effect.mapError(
         (cause) =>
           new TextGenerationError({
@@ -251,14 +285,6 @@ const makeGeminiTextGeneration = Effect.gen(function* () {
             cause,
           }),
       ),
-    );
-    yield* writeGeminiCliSettings({ home: geminiHome }).pipe(
-      Effect.orElseSucceed(() => geminiHome),
-    );
-    // Seed the scratch home with the user's Gemini auth so
-    // `gemini --prompt` doesn't trip a re-auth prompt.
-    yield* seedGeminiCliHomeAuth({ home: geminiHome }).pipe(
-      Effect.orElseSucceed(() => [] as ReadonlyArray<string>),
     );
 
     const staged = yield* stageAttachments(operation, attachments);
@@ -269,10 +295,9 @@ const makeGeminiTextGeneration = Effect.gen(function* () {
       staged.promptTokens.length > 0
         ? `${prompt}\n\nAttachments:\n${staged.promptTokens.join(" ")}`
         : prompt;
-    const cleanup = Effect.all(
-      [removeDirectoryQuietly(geminiHome), removeDirectoryQuietly(staged.directory)],
-      { discard: true, concurrency: "unbounded" },
-    );
+    // The shared home is cleaned up by the Layer finalizer; per-request
+    // cleanup only owns the per-request attachment staging dir.
+    const cleanup = removeDirectoryQuietly(staged.directory);
 
     const runGeminiCommand = Effect.fn("runGeminiJson.runGeminiCommand")(function* (
       effectivePrompt: string,
@@ -378,59 +403,49 @@ const makeGeminiTextGeneration = Effect.gen(function* () {
           extractJsonObject(rawStdout),
         ).pipe(
           Effect.catchTag("SchemaError", (cause) =>
-            Effect.fail<GeminiJsonDecodeError>({
-              _tag: "GeminiJsonDecodeError",
-              detail: "Gemini CLI returned unexpected output format.",
-              cause,
-            }),
+            Effect.fail(
+              new GeminiJsonDecodeError({
+                detail: "Gemini CLI returned unexpected output format.",
+                cause,
+              }),
+            ),
           ),
         );
 
         const innerJson = extractJsonObject(envelope.response);
         if (innerJson.length === 0) {
-          return yield* Effect.fail<GeminiJsonDecodeError>({
-            _tag: "GeminiJsonDecodeError",
+          return yield* new GeminiJsonDecodeError({
             detail: "Gemini CLI returned empty structured output.",
           });
         }
 
         return yield* Schema.decodeEffect(Schema.fromJsonString(outputSchemaJson))(innerJson).pipe(
           Effect.catchTag("SchemaError", (cause) =>
-            Effect.fail<GeminiJsonDecodeError>({
-              _tag: "GeminiJsonDecodeError",
-              detail: "Gemini returned invalid structured output.",
-              cause,
-            }),
+            Effect.fail(
+              new GeminiJsonDecodeError({
+                detail: "Gemini returned invalid structured output.",
+                cause,
+              }),
+            ),
           ),
         );
       });
 
     // First attempt uses the original prompt. On JSON decode failure, retry
     // once with an explicit "return valid JSON only" instruction. On the
-    // second failure, surface a TextGenerationError (step 25).
+    // second failure, surface a TextGenerationError.
     return yield* attempt(promptWithTokens).pipe(
-      Effect.catchIf(
-        (error): error is GeminiJsonDecodeError =>
-          typeof error === "object" &&
-          error !== null &&
-          "_tag" in error &&
-          (error as { _tag: string })._tag === "GeminiJsonDecodeError",
-        () => attempt(`${promptWithTokens}${GEMINI_JSON_RETRY_SUFFIX}`),
+      Effect.catchTag("GeminiJsonDecodeError", () =>
+        attempt(`${promptWithTokens}${GEMINI_JSON_RETRY_SUFFIX}`),
       ),
-      Effect.catchIf(
-        (error): error is GeminiJsonDecodeError =>
-          typeof error === "object" &&
-          error !== null &&
-          "_tag" in error &&
-          (error as { _tag: string })._tag === "GeminiJsonDecodeError",
-        (error) =>
-          Effect.fail(
-            new TextGenerationError({
-              operation,
-              detail: error.detail,
-              ...(error.cause !== undefined ? { cause: error.cause } : {}),
-            }),
-          ),
+      Effect.catchTag("GeminiJsonDecodeError", (error) =>
+        Effect.fail(
+          new TextGenerationError({
+            operation,
+            detail: error.detail,
+            ...(error.cause !== undefined ? { cause: error.cause } : {}),
+          }),
+        ),
       ),
       Effect.ensuring(cleanup),
     );

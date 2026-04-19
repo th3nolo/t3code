@@ -285,6 +285,36 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
     }),
   );
 
+  it.effect(
+    "rejects rollbackThread when numTurns exceeds the in-memory turn count (resume-then-rollback guard)",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CursorAdapter;
+        const serverSettings = yield* ServerSettingsService;
+        const threadId = ThreadId.make("cursor-rollback-guard");
+        const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
+        yield* serverSettings.updateSettings({
+          providers: { cursor: { binaryPath: wrapperPath } },
+        });
+
+        yield* adapter.startSession({
+          threadId,
+          provider: "cursor",
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: { provider: "cursor", model: "default" },
+        });
+
+        // No sendTurn calls — ctx.turns is empty. Pre-fix this would
+        // silently no-op; the guard now turns it into a validation error
+        // so callers can't corrupt persisted state via afterRollback.
+        const result = yield* adapter.rollbackThread(threadId, 2).pipe(Effect.result);
+        assert.equal(result._tag, "Failure");
+
+        yield* adapter.stopSession(threadId);
+      }),
+  );
+
   it.effect("maps app plan mode onto the ACP plan session mode", () =>
     Effect.gen(function* () {
       const adapter = yield* CursorAdapter;

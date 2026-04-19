@@ -18,6 +18,7 @@ import {
   type ProviderInteractionMode,
   type RuntimeMode,
   type ThreadId,
+  TurnId,
 } from "@t3tools/contracts";
 import { Effect, FileSystem, Layer, Ref, Scope, SynchronizedRef } from "effect";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -61,6 +62,8 @@ import {
   truncateGeminiTurns,
   truncatePersistedGeminiMessages,
   updateLastGeminiTurnStatus,
+  withGeminiChatFileRelativePath,
+  writeGeminiSessionMetadata,
   type GeminiSessionMetadata,
 } from "../geminiSessionStore.ts";
 
@@ -78,6 +81,24 @@ interface GeminiExtra {
   readonly metadataRef: Ref.Ref<GeminiSessionMetadata>;
   readonly home: string;
   messageCount: number;
+  /**
+   * Last-applied per-turn ACP configuration. We compare against this
+   * before issuing `session/set_mode`, `session/set_model`, and any
+   * downstream `setConfigOption` calls so we don't pay 3+ RPC roundtrips
+   * on every prompt for state that hasn't changed.
+   */
+  lastAppliedMode: string | undefined;
+  lastAppliedModel: string | undefined;
+  lastAppliedConfigKey: string | undefined;
+}
+
+function geminiModelOptionsKey(options: GeminiModelOptions | null | undefined): string {
+  if (!options) return "";
+  return JSON.stringify({
+    thinking: options.thinking ?? null,
+    effort: options.effort ?? null,
+    contextWindow: options.contextWindow ?? null,
+  });
 }
 
 /**
@@ -159,26 +180,32 @@ function tolerateOptionalAcpCall(label: string) {
  * AcpSessionRuntime.setMode helper routes through
  * `setConfigOption("mode", …)` which Gemini rejects as "Method not
  * found" — use the raw RPC instead.
+ *
+ * Returns the resolved mode id (or undefined if no mode applies) so the
+ * caller can record it in the per-thread "last-applied" cache.
  */
 function applyRequestedSessionMode(input: {
   readonly runtime: AcpSessionRuntimeShape;
   readonly sessionId: string;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode | undefined;
-}): Effect.Effect<void, never> {
+  readonly lastAppliedMode: string | undefined;
+}): Effect.Effect<string | undefined, never> {
   return Effect.gen(function* () {
     const requestedModeId = resolveRequestedGeminiModeId({
       interactionMode: input.interactionMode,
       runtimeMode: input.runtimeMode,
       modeState: yield* input.runtime.getModeState,
     });
-    if (!requestedModeId) return;
+    if (!requestedModeId) return undefined;
+    if (input.lastAppliedMode === requestedModeId) return requestedModeId;
     yield* input.runtime
       .request("session/set_mode", {
         sessionId: input.sessionId,
         modeId: requestedModeId,
       })
       .pipe(Effect.asVoid, tolerateOptionalAcpCall("session/set_mode"));
+    return requestedModeId;
   });
 }
 
@@ -187,33 +214,46 @@ function applyRequestedSessionMode(input: {
  * first, then apply thinking/effort/context via `setConfigOption`. Both
  * calls are tolerated — session start never fails because the agent
  * chose to implement one or the other.
+ *
+ * Returns the resolved (model, configKey) pair so the caller can populate
+ * the per-thread cache and skip duplicate RPCs on subsequent turns.
  */
 function applyRequestedSessionModelSelection(input: {
   readonly runtime: AcpSessionRuntimeShape;
   readonly sessionId: string;
   readonly model: string | undefined | null;
   readonly modelOptions: GeminiModelOptions | null | undefined;
-}): Effect.Effect<void, never> {
+  readonly lastAppliedModel: string | undefined;
+  readonly lastAppliedConfigKey: string | undefined;
+}): Effect.Effect<
+  { readonly appliedModel: string | undefined; readonly appliedConfigKey: string },
+  never
+> {
   return Effect.gen(function* () {
     const trimmed = input.model?.trim();
-    if (trimmed && trimmed.length > 0 && trimmed !== "auto") {
+    const resolvedModel = trimmed && trimmed.length > 0 && trimmed !== "auto" ? trimmed : undefined;
+    if (resolvedModel && input.lastAppliedModel !== resolvedModel) {
       yield* input.runtime
         .request("session/set_model", {
           sessionId: input.sessionId,
-          modelId: trimmed,
+          modelId: resolvedModel,
         })
         .pipe(Effect.asVoid, tolerateOptionalAcpCall("session/set_model"));
     }
-    yield* applyGeminiAcpModelSelection({
-      runtime: input.runtime,
-      model: undefined,
-      modelOptions: input.modelOptions,
-      mapError: ({ cause }) => cause,
-    }).pipe(
-      Effect.catch(() =>
-        Effect.logDebug("Gemini ACP config-option update failed, ignoring").pipe(Effect.asVoid),
-      ),
-    );
+    const configKey = geminiModelOptionsKey(input.modelOptions);
+    if (input.lastAppliedConfigKey !== configKey) {
+      yield* applyGeminiAcpModelSelection({
+        runtime: input.runtime,
+        model: undefined,
+        modelOptions: input.modelOptions,
+        mapError: ({ cause }) => cause,
+      }).pipe(
+        Effect.catch(() =>
+          Effect.logDebug("Gemini ACP config-option update failed, ignoring").pipe(Effect.asVoid),
+        ),
+      );
+    }
+    return { appliedModel: resolvedModel ?? input.lastAppliedModel, appliedConfigKey: configKey };
   });
 }
 
@@ -225,6 +265,23 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
     const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
     const flavorCacheRef = yield* SynchronizedRef.make(new Map<string, GeminiAcpFlavor>());
+
+    /**
+     * Per-thread "last-applied configuration" cache. Keyed by threadId so
+     * sequential turns on the same thread don't re-issue identical
+     * `session/set_mode`, `session/set_model`, or `setConfigOption` RPCs.
+     * Cleared in beforeStop. The hook surface for applySessionConfiguration
+     * doesn't carry ctx.extra, so we use a map keyed by threadId instead
+     * of widening the hook signature.
+     */
+    const appliedConfigByThread = new Map<
+      ThreadId,
+      {
+        mode: string | undefined;
+        model: string | undefined;
+        configKey: string | undefined;
+      }
+    >();
 
     /**
      * Resolve the Gemini ACP flavor (`--acp` vs `--experimental-acp`) and
@@ -277,7 +334,9 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
     const persistMetadata = (extra: GeminiExtra) =>
       Ref.get(extra.metadataRef).pipe(
         Effect.flatMap((metadata) =>
-          fileSystem.writeFileString(extra.metadataPath, `${JSON.stringify(metadata, null, 2)}\n`),
+          writeGeminiSessionMetadata({ metadataPath: extra.metadataPath, metadata }).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+          ),
         ),
         Effect.catchCause((cause) =>
           Effect.logWarning("failed to persist gemini session metadata", {
@@ -286,15 +345,44 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
         ),
       );
 
-    const truncateChatIfIncomplete = (extra: GeminiExtra, acpSessionId: string) =>
+    const recordChatFileRelativePath = (extra: GeminiExtra, relativePath: string) =>
       Effect.gen(function* () {
-        const metadata = yield* Ref.get(extra.metadataRef);
-        if (metadata.turns.length === 0) return;
+        const changed = yield* Ref.modify(extra.metadataRef, (metadata) => {
+          const next = withGeminiChatFileRelativePath(metadata, relativePath);
+          return [next !== metadata, next] as const;
+        });
+        if (changed) {
+          yield* persistMetadata(extra);
+        }
+      });
+
+    /**
+     * If the metadata's last turn is `incomplete`, locate the persisted chat
+     * file and truncate it back to `messageCountBefore`. Returns the resolved
+     * count + relativePath so callers can update their in-memory state. The
+     * truncate is best-effort — failures are swallowed and the assumed count
+     * is returned.
+     */
+    const resolveAndTruncateIfIncomplete = (input: {
+      readonly home: string;
+      readonly sessionId: string;
+      readonly metadata: GeminiSessionMetadata;
+    }): Effect.Effect<
+      | {
+          readonly nextMessageCount: number;
+          readonly chatFileRelativePath: string | undefined;
+        }
+      | undefined,
+      never
+    > =>
+      Effect.gen(function* () {
+        const { metadata } = input;
+        if (metadata.turns.length === 0) return undefined;
         const lastTurn = metadata.turns[metadata.turns.length - 1]!;
-        if (lastTurn.status !== "incomplete") return;
+        if (lastTurn.status !== "incomplete") return undefined;
         const chatFile = yield* resolveGeminiChatFile({
-          home: extra.home,
-          sessionId: acpSessionId,
+          home: input.home,
+          sessionId: input.sessionId,
           ...(metadata.chatFileRelativePath
             ? { chatFileRelativePath: metadata.chatFileRelativePath }
             : {}),
@@ -302,7 +390,12 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.orElseSucceed(() => undefined),
         );
-        if (!chatFile) return;
+        if (!chatFile) {
+          return {
+            nextMessageCount: lastTurn.messageCountBefore,
+            chatFileRelativePath: metadata.chatFileRelativePath,
+          };
+        }
         yield* truncatePersistedGeminiMessages({
           chatFilePath: chatFile.absolutePath,
           messageCount: lastTurn.messageCountBefore,
@@ -310,7 +403,25 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.orElseSucceed(() => lastTurn.messageCountBefore),
         );
-        extra.messageCount = lastTurn.messageCountBefore;
+        return {
+          nextMessageCount: lastTurn.messageCountBefore,
+          chatFileRelativePath: chatFile.relativePath,
+        };
+      });
+
+    const truncateChatIfIncomplete = (extra: GeminiExtra, acpSessionId: string) =>
+      Effect.gen(function* () {
+        const metadata = yield* Ref.get(extra.metadataRef);
+        const result = yield* resolveAndTruncateIfIncomplete({
+          home: extra.home,
+          sessionId: acpSessionId,
+          metadata,
+        });
+        if (!result) return;
+        extra.messageCount = result.nextMessageCount;
+        if (result.chatFileRelativePath) {
+          yield* recordChatFileRelativePath(extra, result.chatFileRelativePath);
+        }
       });
 
     const base = yield* makeAcpAdapter<"gemini", GeminiExtra>(
@@ -329,7 +440,7 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
           return modelSelection.model;
         },
 
-        validateStartInput: (input) =>
+        validateStartInput: () =>
           Effect.gen(function* () {
             const settings = yield* serverSettingsService.getSettings.pipe(
               Effect.map((s) => s.providers.gemini),
@@ -350,7 +461,6 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
                 issue: launchArgsError.message,
               });
             }
-            void input;
           }),
 
         buildSession: ({ startInput, cwd, resumeSessionId, nativeLoggers }) =>
@@ -398,31 +508,30 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
               Effect.orElseSucceed(() => [] as ReadonlyArray<string>),
             );
 
-            const persistedMetadata = yield* readGeminiSessionMetadata(threadPaths.metadataPath);
+            const persistedMetadataRaw = yield* readGeminiSessionMetadata(threadPaths.metadataPath);
 
             // If the persisted last turn is incomplete, roll the chat
             // file back before the CLI reads it on resume. Otherwise the
-            // resumed session would replay a half-finished turn.
-            if (
-              persistedMetadata !== undefined &&
-              persistedMetadata.turns.length > 0 &&
-              persistedMetadata.turns[persistedMetadata.turns.length - 1]!.status === "incomplete"
-            ) {
-              const lastTurn = persistedMetadata.turns[persistedMetadata.turns.length - 1]!;
-              const chatFile = yield* resolveGeminiChatFile({
-                home: threadPaths.home,
-                sessionId: persistedMetadata.sessionId,
-                ...(persistedMetadata.chatFileRelativePath
-                  ? { chatFileRelativePath: persistedMetadata.chatFileRelativePath }
-                  : {}),
-              }).pipe(Effect.orElseSucceed(() => undefined));
-              if (chatFile) {
-                yield* truncatePersistedGeminiMessages({
-                  chatFilePath: chatFile.absolutePath,
-                  messageCount: lastTurn.messageCountBefore,
-                }).pipe(Effect.orElseSucceed(() => lastTurn.messageCountBefore));
-              }
-            }
+            // resumed session would replay a half-finished turn. Reuse the
+            // helper so this logic stays in lockstep with the in-session
+            // truncate path.
+            const persistedMetadata: GeminiSessionMetadata | undefined =
+              persistedMetadataRaw !== undefined
+                ? yield* Effect.gen(function* () {
+                    const result = yield* resolveAndTruncateIfIncomplete({
+                      home: threadPaths.home,
+                      sessionId: persistedMetadataRaw.sessionId,
+                      metadata: persistedMetadataRaw,
+                    });
+                    if (result?.chatFileRelativePath) {
+                      return withGeminiChatFileRelativePath(
+                        persistedMetadataRaw,
+                        result.chatFileRelativePath,
+                      );
+                    }
+                    return persistedMetadataRaw;
+                  })
+                : undefined;
 
             const resolvedFlavor = yield* resolveFlavorCached({
               geminiSettings,
@@ -475,6 +584,9 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
                 metadataRef,
                 home: threadPaths.home,
                 messageCount,
+                lastAppliedMode: undefined,
+                lastAppliedModel: undefined,
+                lastAppliedConfigKey: undefined,
               } satisfies GeminiExtra,
             };
           }),
@@ -485,21 +597,35 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
           runtimeMode,
           interactionMode,
           modelSelection,
+          threadId,
         }) =>
           Effect.gen(function* () {
-            yield* applyRequestedSessionMode({
+            const cached = appliedConfigByThread.get(threadId) ?? {
+              mode: undefined,
+              model: undefined,
+              configKey: undefined,
+            };
+            const appliedMode = yield* applyRequestedSessionMode({
               runtime: acp,
               sessionId,
               runtimeMode,
               interactionMode,
+              lastAppliedMode: cached.mode,
             });
             const geminiModelSelection =
               modelSelection?.provider === "gemini" ? modelSelection : undefined;
-            yield* applyRequestedSessionModelSelection({
+            const appliedModel = yield* applyRequestedSessionModelSelection({
               runtime: acp,
               sessionId,
               model: geminiModelSelection?.model,
               modelOptions: geminiModelSelection?.options,
+              lastAppliedModel: cached.model,
+              lastAppliedConfigKey: cached.configKey,
+            });
+            appliedConfigByThread.set(threadId, {
+              mode: appliedMode ?? cached.mode,
+              model: appliedModel.appliedModel,
+              configKey: appliedModel.appliedConfigKey,
             });
           }),
 
@@ -512,8 +638,22 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
                 makeInitialGeminiMetadata({ sessionId: ctx.acpSessionId }),
               );
               ctx.extra.messageCount = 0;
+              yield* persistMetadata(ctx.extra);
+              return;
             }
             yield* persistMetadata(ctx.extra);
+            // Resume hit: seed ctx.turns from persisted metadata so
+            // readThread + rollbackThread don't lie about an empty thread
+            // before any new in-process turn happens. Items stay empty
+            // because we don't persist message bodies — readThread is
+            // only used internally for in-process replay today.
+            if (current.turns.length === 0) return;
+            return {
+              seedTurns: current.turns.map((turn) => ({
+                id: TurnId.make(turn.turnId),
+                items: [] as Array<unknown>,
+              })),
+            };
           }),
 
         beforeTurn: ({ ctx, turnId }) =>
@@ -547,18 +687,42 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
               Effect.provideService(FileSystem.FileSystem, fileSystem),
               Effect.orElseSucceed(() => undefined),
             );
+            if (chatFileAfterPrompt) {
+              yield* Ref.update(ctx.extra.metadataRef, (metadata) =>
+                withGeminiChatFileRelativePath(metadata, chatFileAfterPrompt.relativePath),
+              );
+            }
             const countedMessages = chatFileAfterPrompt
               ? yield* countPersistedGeminiMessages(chatFileAfterPrompt.absolutePath).pipe(
                   Effect.provideService(FileSystem.FileSystem, fileSystem),
                   Effect.orElseSucceed(() => messageCountBefore + 2),
                 )
               : messageCountBefore + 2;
+
+            if (stopReason === "cancelled") {
+              if (chatFileAfterPrompt && countedMessages > messageCountBefore) {
+                yield* truncatePersistedGeminiMessages({
+                  chatFilePath: chatFileAfterPrompt.absolutePath,
+                  messageCount: messageCountBefore,
+                }).pipe(
+                  Effect.provideService(FileSystem.FileSystem, fileSystem),
+                  Effect.orElseSucceed(() => messageCountBefore),
+                );
+              }
+              ctx.extra.messageCount = messageCountBefore;
+              yield* Ref.update(ctx.extra.metadataRef, (metadata) =>
+                updateLastGeminiTurnStatus(metadata, "incomplete", {
+                  messageCountAfter: messageCountBefore,
+                }),
+              );
+              yield* persistMetadata(ctx.extra);
+              return;
+            }
+
             ctx.extra.messageCount =
               countedMessages >= messageCountBefore ? countedMessages : messageCountBefore + 2;
-
-            const status = stopReason === "cancelled" ? "incomplete" : "completed";
             yield* Ref.update(ctx.extra.metadataRef, (metadata) =>
-              updateLastGeminiTurnStatus(metadata, status, {
+              updateLastGeminiTurnStatus(metadata, "completed", {
                 messageCountAfter: ctx.extra.messageCount,
               }),
             );
@@ -584,7 +748,11 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
             });
           }),
 
-        beforeStop: (ctx) => truncateChatIfIncomplete(ctx.extra, ctx.acpSessionId),
+        beforeStop: (ctx) =>
+          Effect.gen(function* () {
+            yield* truncateChatIfIncomplete(ctx.extra, ctx.acpSessionId);
+            appliedConfigByThread.delete(ctx.threadId);
+          }),
 
         afterRollback: ({ ctx, numTurns }) =>
           Effect.gen(function* () {
@@ -608,6 +776,9 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
               Effect.orElseSucceed(() => undefined),
             );
             if (chatFile) {
+              yield* Ref.update(ctx.extra.metadataRef, (metadata) =>
+                withGeminiChatFileRelativePath(metadata, chatFile.relativePath),
+              );
               yield* truncatePersistedGeminiMessages({
                 chatFilePath: chatFile.absolutePath,
                 messageCount: ctx.extra.messageCount,

@@ -133,6 +133,12 @@ const PROVIDER_SETTINGS: readonly InstallProviderSettings[] = [
     binaryDescription: "Path to the Claude binary",
   },
   {
+    provider: "gemini",
+    title: "Gemini",
+    binaryPlaceholder: "Gemini binary path",
+    binaryDescription: "Path to the Gemini binary",
+  },
+  {
     provider: "cursor",
     title: "Cursor",
     badgeLabel: "Early Access",
@@ -1453,6 +1459,38 @@ export function GeneralSettingsPanel() {
                       </div>
                     ) : null}
 
+                    {providerCard.provider === "gemini" ? (
+                      <div className="border-t border-border/60 px-4 py-3 sm:px-5">
+                        <label htmlFor="provider-install-gemini-launch-args" className="block">
+                          <span className="text-xs font-medium text-foreground">
+                            Launch arguments
+                          </span>
+                          <Input
+                            id="provider-install-gemini-launch-args"
+                            className="mt-1.5"
+                            value={settings.providers.gemini.launchArgs}
+                            onChange={(event) =>
+                              updateSettings({
+                                providers: {
+                                  ...settings.providers,
+                                  gemini: {
+                                    ...settings.providers.gemini,
+                                    launchArgs: event.target.value,
+                                  },
+                                },
+                              })
+                            }
+                            placeholder="e.g. --verbose"
+                            spellCheck={false}
+                          />
+                          <span className="mt-1 block text-xs text-muted-foreground">
+                            Additional CLI arguments passed to Gemini on session start. T3 Code
+                            manages --acp, --model, --prompt, and other reserved flags.
+                          </span>
+                        </label>
+                      </div>
+                    ) : null}
+
                     <div className="border-t border-border/60 px-4 py-3 sm:px-5">
                       <div className="text-xs font-medium text-foreground">Models</div>
                       <div className="mt-1 text-xs text-muted-foreground">
@@ -1567,7 +1605,9 @@ export function GeneralSettingsPanel() {
                               ? "gpt-6.7-codex-ultra-preview"
                               : providerCard.provider === "opencode"
                                 ? "openai/gpt-5"
-                                : "claude-sonnet-5-0"
+                                : providerCard.provider === "gemini"
+                                  ? "gemini-2.5-flash"
+                                  : "claude-sonnet-5-0"
                           }
                           spellCheck={false}
                         />

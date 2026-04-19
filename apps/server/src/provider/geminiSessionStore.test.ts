@@ -20,6 +20,7 @@ import {
   truncateGeminiTurns,
   truncatePersistedGeminiMessages,
   updateLastGeminiTurnStatus,
+  withGeminiChatFileRelativePath,
   writeGeminiSessionMetadata,
 } from "./geminiSessionStore.ts";
 
@@ -139,6 +140,30 @@ describe("metadata list helpers", () => {
   it("truncateGeminiTurns handles no-op requests", () => {
     expect(truncateGeminiTurns(initial, 3).next).toEqual(initial);
     expect(truncateGeminiTurns(initial, 3).truncated).toEqual([]);
+  });
+});
+
+describe("withGeminiChatFileRelativePath", () => {
+  const initial = makeInitialGeminiMetadata({ sessionId: "s1" });
+
+  it("returns the same reference when the value already matches", () => {
+    const seeded = withGeminiChatFileRelativePath(initial, "tmp/chats/a.json");
+    expect(seeded.chatFileRelativePath).toBe("tmp/chats/a.json");
+    const sameAgain = withGeminiChatFileRelativePath(seeded, "tmp/chats/a.json");
+    expect(sameAgain).toBe(seeded);
+  });
+
+  it("returns the same reference for blank input so callers can skip persisting", () => {
+    expect(withGeminiChatFileRelativePath(initial, "")).toBe(initial);
+    expect(withGeminiChatFileRelativePath(initial, "   ")).toBe(initial);
+  });
+
+  it("trims and replaces when the value differs", () => {
+    const first = withGeminiChatFileRelativePath(initial, "  tmp/chats/old.json  ");
+    expect(first.chatFileRelativePath).toBe("tmp/chats/old.json");
+    const second = withGeminiChatFileRelativePath(first, "tmp/chats/new.json");
+    expect(second.chatFileRelativePath).toBe("tmp/chats/new.json");
+    expect(second).not.toBe(first);
   });
 });
 

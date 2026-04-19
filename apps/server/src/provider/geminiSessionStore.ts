@@ -41,6 +41,8 @@ const decodeGeminiChatEnvelope = Schema.decodeUnknownEffect(
   Schema.fromJsonString(GeminiChatEnvelope),
 );
 
+const decodeGeminiChatEnvelopeValue = Schema.decodeUnknownEffect(GeminiChatEnvelope);
+
 export function parseGeminiResumeCursor(raw: unknown): GeminiResumeCursor | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return undefined;
@@ -172,6 +174,28 @@ export function makeInitialGeminiMetadata(input: {
   };
 }
 
+/**
+ * Replace `chatFileRelativePath` if it differs (or is currently absent). Returns
+ * the input metadata unchanged when the value already matches, so callers can
+ * skip the persist step.
+ */
+export function withGeminiChatFileRelativePath(
+  metadata: GeminiSessionMetadata,
+  chatFileRelativePath: string,
+): GeminiSessionMetadata {
+  const trimmed = chatFileRelativePath.trim();
+  if (trimmed.length === 0) {
+    return metadata;
+  }
+  if (metadata.chatFileRelativePath === trimmed) {
+    return metadata;
+  }
+  return {
+    ...metadata,
+    chatFileRelativePath: trimmed,
+  };
+}
+
 export function makeGeminiTurnRecord(input: {
   readonly turnId: TurnId;
   readonly messageCountBefore: number;
@@ -206,14 +230,13 @@ export const truncatePersistedGeminiMessages = (input: {
 }) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    // Parse the raw JSON (not the schema-decoded envelope) so unknown fields
-    // like `metadata` or `model` survive the round-trip. We only touch the
-    // `messages` key — everything else is preserved exactly.
+    // Parse the raw JSON once, then validate the parsed value matches our
+    // envelope shape (surfacing corrupted chat files early). Working off the
+    // raw object preserves unknown fields like `metadata` or `model` through
+    // the round-trip — schema-decoding would strip them.
     const raw = yield* fs.readFileString(input.chatFilePath);
-    // Validate it decodes to our envelope shape; this surfaces corrupted
-    // chat files early while still letting us carry extra properties.
-    yield* decodeGeminiChatEnvelope(raw);
     const parsed = JSON.parse(raw) as Record<string, unknown>;
+    yield* decodeGeminiChatEnvelopeValue(parsed);
     const messages = Array.isArray(parsed["messages"]) ? parsed["messages"] : [];
     const nextMessageCount = Math.max(0, Math.trunc(input.messageCount));
     const nextMessages = messages.slice(0, nextMessageCount);

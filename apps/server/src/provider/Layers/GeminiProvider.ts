@@ -25,7 +25,6 @@ import {
   buildGeminiCapabilitiesFromConfigOptions,
   findGeminiModelConfigOption,
   flattenGeminiSessionConfigSelectOptions,
-  GEMINI_KEYRING_NEUTRALIZING_ENV,
   makeGeminiAcpRuntime,
   resolveGeminiAuthMethod,
   seedGeminiCliHomeAuth,
@@ -116,7 +115,11 @@ function geminiAuthLabel(method: string | undefined): ServerProviderAuth {
         label: "Google Account (OAuth)",
       };
     default:
-      return { status: "unknown" };
+      // Probe ran successfully and explicitly returned no method — that's
+      // a conclusive "no creds", not "we couldn't tell". Returning
+      // `unauthenticated` lets makeManagedServerProvider's enrichSnapshot
+      // skip background capability discovery (it's gated on this status).
+      return { status: "unauthenticated" };
   }
 }
 
@@ -288,7 +291,7 @@ export const checkGeminiProviderStatus = Effect.fn("checkGeminiProviderStatus")(
     const authMethod = resolveGeminiAuthMethod();
     const auth = geminiAuthLabel(authMethod);
     const unauthenticatedMessage =
-      auth.status === "unknown"
+      auth.status !== "authenticated"
         ? "No Gemini auth method detected. Run `gemini auth login`, set GEMINI_API_KEY, or configure Vertex/ADC environment variables."
         : undefined;
 
@@ -345,6 +348,9 @@ const withGeminiAcpProbe = <A, E, R>(input: {
       Effect.orElseSucceed(() => [] as ReadonlyArray<string>),
     );
 
+    // Note: keyring-env neutralization is added unconditionally by
+    // buildGeminiAcpSpawnInput (GeminiAcpSupport.ts) — no need to pass
+    // spawnEnv here.
     const runtime = yield* makeGeminiAcpRuntime({
       childProcessSpawner: spawner,
       geminiSettings: input.geminiSettings,
@@ -352,7 +358,6 @@ const withGeminiAcpProbe = <A, E, R>(input: {
       home: probeHome,
       clientInfo: { name: "t3-code-gemini-provider-probe", version: "0.0.0" },
       authMethodId: resolveGeminiAuthMethod() ?? "oauth-personal",
-      spawnEnv: GEMINI_KEYRING_NEUTRALIZING_ENV,
     });
     return yield* input.useRuntime(runtime);
   }).pipe(Effect.scoped);
@@ -420,6 +425,9 @@ export const discoverGeminiCapabilitiesViaAcp = (input: {
             (modelChoice) => {
               const modelSlug = modelChoice.value.trim();
               if (!modelSlug || !targetSlugs.has(modelSlug) || capabilitiesBySlug.has(modelSlug)) {
+                // Effect.void can't be used here: the closure must return
+                // `[string, ModelCapabilities] | undefined` so the outer
+                // forEach result can be filtered downstream.
                 return Effect.succeed<readonly [string, ModelCapabilities] | undefined>(undefined);
               }
               return withGeminiAcpProbe({
