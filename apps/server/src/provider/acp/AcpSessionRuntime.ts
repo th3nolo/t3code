@@ -113,7 +113,6 @@ type AcpStartState =
   | { readonly _tag: "Started"; readonly result: AcpStartedState };
 
 interface AcpAssistantSegmentState {
-  readonly nextSegmentIndex: number;
   readonly activeItemId?: string;
 }
 
@@ -149,7 +148,7 @@ const makeAcpSessionRuntime = (
     const eventQueue = yield* Queue.unbounded<AcpParsedSessionEvent>();
     const modeStateRef = yield* Ref.make<AcpSessionModeState | undefined>(undefined);
     const toolCallsRef = yield* Ref.make(new Map<string, AcpToolCallState>());
-    const assistantSegmentRef = yield* Ref.make<AcpAssistantSegmentState>({ nextSegmentIndex: 0 });
+    const assistantSegmentRef = yield* Ref.make<AcpAssistantSegmentState>({});
     const configOptionsRef = yield* Ref.make(sessionConfigOptionsFromSetup(undefined));
     const startStateRef = yield* Ref.make<AcpStartState>({ _tag: "NotStarted" });
 
@@ -658,8 +657,17 @@ function shouldEmitToolCallUpdate(
   return previous === undefined || previous.title !== next.title || previous.detail !== next.detail;
 }
 
-const assistantItemId = (sessionId: string, segmentIndex: number) =>
-  `assistant:${sessionId}:segment:${segmentIndex}`;
+/**
+ * Build a fresh assistant-segment id. Each segment gets a UUID instead
+ * of a monotonic counter so message ids stay unique across ACP session
+ * resumes — the runtime's in-memory counter resets to 0 whenever we
+ * rebuild it, which previously collided with segment ids already
+ * persisted in the projection (older segments from a prior run of the
+ * same ACP sessionId would share the key and get silently overwritten
+ * by late deltas).
+ */
+const assistantItemId = (sessionId: string) =>
+  `assistant:${sessionId}:segment:${crypto.randomUUID()}`;
 
 const ensureActiveAssistantSegment = ({
   queue,
@@ -676,7 +684,7 @@ const ensureActiveAssistantSegment = ({
       if (current.activeItemId) {
         return [{ itemId: current.activeItemId }, current] as const;
       }
-      const itemId = assistantItemId(sessionId, current.nextSegmentIndex);
+      const itemId = assistantItemId(sessionId);
       return [
         {
           itemId,
@@ -686,7 +694,6 @@ const ensureActiveAssistantSegment = ({
           } satisfies Extract<AcpParsedSessionEvent, { readonly _tag: "AssistantItemStarted" }>,
         },
         {
-          nextSegmentIndex: current.nextSegmentIndex + 1,
           activeItemId: itemId,
         } satisfies AcpAssistantSegmentState,
       ] as const;
@@ -715,8 +722,6 @@ const closeActiveAssistantSegment = ({
         _tag: "AssistantItemCompleted",
         itemId: current.activeItemId,
       } satisfies AcpParsedSessionEvent,
-      {
-        nextSegmentIndex: current.nextSegmentIndex,
-      } satisfies AcpAssistantSegmentState,
+      {} satisfies AcpAssistantSegmentState,
     ] as const;
   }).pipe(Effect.flatMap((event) => (event ? Queue.offer(queue, event) : Effect.void)));

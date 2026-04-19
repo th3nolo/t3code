@@ -163,7 +163,10 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       assert.isDefined(delta);
       if (delta?.type === "content.delta") {
         assert.equal(delta.payload.delta, "hello from mock");
-        assert.match(String(delta.itemId), /^assistant:mock-session-1:segment:0$/);
+        assert.match(
+          String(delta.itemId),
+          /^assistant:mock-session-1:segment:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+        );
       }
 
       const assistantCompleted = runtimeEvents.find(
@@ -182,6 +185,47 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       }
 
       yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("assistant segment ids stay unique across ACP session resumes on the same thread", () =>
+    // Regression: the runtime's per-instance segment counter used to
+    // start from 0 on every fresh runtime, so a resumed session
+    // (same ACP sessionId, new runtime) produced segment ids that
+    // collided with ones already persisted in the projection. The
+    // projection then merged new deltas into old rows and the UI
+    // never saw the new reply.
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-resume-id-collision");
+      const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
+      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      const runRound = Effect.fn("runRound")(function* () {
+        const collected = yield* Stream.take(adapter.streamEvents, 9).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          threadId,
+          provider: "cursor",
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: { provider: "cursor", model: "default" },
+        });
+        yield* adapter.sendTurn({ threadId, input: "hi", attachments: [] });
+        const events = Array.from(yield* Fiber.join(collected));
+        yield* adapter.stopSession(threadId);
+        const delta = events.find((event) => event.type === "content.delta");
+        assert.isDefined(delta);
+        if (delta?.type !== "content.delta") throw new Error("unreachable");
+        return String(delta.itemId);
+      });
+
+      const firstItemId = yield* runRound();
+      const secondItemId = yield* runRound();
+      assert.notEqual(firstItemId, secondItemId);
     }),
   );
 
@@ -576,7 +620,10 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
           if (contentDelta?.type === "content.delta") {
             assert.equal(String(contentDelta.turnId), String(turn.turnId));
             assert.equal(contentDelta.payload.delta, "hello from mock");
-            assert.equal(String(contentDelta.itemId), "assistant:mock-session-1:segment:0");
+            assert.match(
+              String(contentDelta.itemId),
+              /^assistant:mock-session-1:segment:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+            );
           }
         });
 
