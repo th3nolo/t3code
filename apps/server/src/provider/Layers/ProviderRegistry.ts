@@ -18,6 +18,7 @@ import { CursorProvider } from "../Services/CursorProvider.ts";
 import { GeminiProvider } from "../Services/GeminiProvider.ts";
 import { OpenCodeProvider } from "../Services/OpenCodeProvider.ts";
 import { ProviderRegistry, type ProviderRegistryShape } from "../Services/ProviderRegistry.ts";
+import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import {
   hydrateCachedProvider,
   PROVIDER_CACHE_IDS,
@@ -312,6 +313,7 @@ export const ProviderRegistryLive = Layer.unwrap(
       Layer.provideMerge(ClaudeProviderLive),
       Layer.provideMerge(GeminiProviderLive),
       Layer.provideMerge(OpenCodeProviderLive),
+      Layer.provideMerge(OpenCodeRuntimeLive),
     ),
   ),
 );

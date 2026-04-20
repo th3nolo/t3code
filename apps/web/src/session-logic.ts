@@ -28,12 +28,14 @@ export const PROVIDER_OPTIONS: Array<{
   value: ProviderPickerKind;
   label: string;
   available: boolean;
+  /** Shown on the model picker sidebar when relevant */
+  pickerSidebarBadge?: "new" | "soon";
 }> = [
   { value: "codex", label: "Codex", available: true },
   { value: "claudeAgent", label: "Claude", available: true },
   { value: "gemini", label: "Gemini", available: true },
-  { value: "opencode", label: "OpenCode", available: true },
-  { value: "cursor", label: "Cursor", available: true },
+  { value: "opencode", label: "OpenCode", available: true, pickerSidebarBadge: "new" },
+  { value: "cursor", label: "Cursor", available: true, pickerSidebarBadge: "new" },
 ];
 
 export interface WorkLogEntry {
