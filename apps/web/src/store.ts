@@ -125,6 +125,15 @@ const MAX_THREAD_PROPOSED_PLANS = 200;
 const MAX_THREAD_ACTIVITIES = 500;
 const EMPTY_THREAD_IDS: ThreadId[] = [];
 
+function extractActivityDetail(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null || !("detail" in payload)) {
+    return null;
+  }
+
+  const { detail } = payload;
+  return typeof detail === "string" && detail.trim().length > 0 ? detail : null;
+}
+
 function arraysEqual<T>(left: readonly T[], right: readonly T[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
@@ -1614,9 +1623,15 @@ function applyEnvironmentOrchestrationEvent(
         ]
           .toSorted(compareActivities)
           .slice(-MAX_THREAD_ACTIVITIES);
+        const isTurnStartFailure = event.payload.activity.kind === "provider.turn.start.failed";
+        const failureDetail = isTurnStartFailure
+          ? extractActivityDetail(event.payload.activity.payload)
+          : null;
         return {
           ...thread,
           activities,
+          ...(isTurnStartFailure ? { pendingSourceProposedPlan: undefined } : {}),
+          error: failureDetail === null ? thread.error : sanitizeThreadErrorMessage(failureDetail),
           updatedAt: event.occurredAt,
         };
       });

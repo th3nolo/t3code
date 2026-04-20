@@ -1014,4 +1014,35 @@ describe("incremental orchestration updates", () => {
     });
     expect(threadsOf(next)[0]?.latestTurn?.sourceProposedPlan).toBeUndefined();
   });
+
+  it("surfaces provider turn-start failures as thread errors and clears pending source plans", () => {
+    const thread = makeThread({
+      pendingSourceProposedPlan: {
+        threadId: ThreadId.make("thread-source"),
+        planId: "plan-1" as never,
+      },
+    });
+
+    const next = applyOrchestrationEvent(
+      makeState(thread),
+      makeEvent("thread.activity-appended", {
+        threadId: thread.id,
+        activity: {
+          id: EventId.make("activity-turn-start-failed"),
+          tone: "error",
+          kind: "provider.turn.start.failed",
+          summary: "Provider turn start failed",
+          payload: {
+            detail: "Failed to prepare Gemini ACP session.",
+          },
+          turnId: null,
+          createdAt: "2026-02-27T00:00:04.000Z",
+        },
+      }),
+      localEnvironmentId,
+    );
+
+    expect(threadsOf(next)[0]?.error).toBe("Failed to prepare Gemini ACP session.");
+    expect(threadsOf(next)[0]?.pendingSourceProposedPlan).toBeUndefined();
+  });
 });

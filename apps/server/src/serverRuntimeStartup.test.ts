@@ -87,6 +87,7 @@ it.effect("launchStartupHeartbeat does not block the caller while counts are loa
               }),
             ),
           getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
+          getProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
           getProjectShellById: () => Effect.succeed(Option.none()),
           getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
           getThreadCheckpointContext: () => Effect.succeed(Option.none()),
@@ -132,7 +133,8 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
         getSnapshot: () => Effect.die("unused"),
         getShellSnapshot: () => Effect.die("unused"),
         getCounts: () => Effect.die("unused"),
-        getActiveProjectByWorkspaceRoot: () =>
+        getActiveProjectByWorkspaceRoot: () => Effect.die("unused"),
+        getProjectByWorkspaceRoot: () =>
           Effect.succeed(
             Option.some({
               id: bootstrapProjectId,
@@ -184,6 +186,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when 
         getShellSnapshot: () => Effect.die("unused"),
         getCounts: () => Effect.die("unused"),
         getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
+        getProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
         getProjectShellById: () => Effect.die("unused"),
         getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
         getThreadCheckpointContext: () => Effect.succeed(Option.none()),
@@ -206,4 +209,56 @@ it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when 
     assert.equal(typeof targets.bootstrapThreadId, "string");
     assert.deepStrictEqual(yield* Ref.get(dispatchCalls), ["project.create", "thread.create"]);
   }),
+);
+
+it.effect(
+  "resolveAutoBootstrapWelcomeTargets does not recreate a deleted project for the startup cwd",
+  () =>
+    Effect.gen(function* () {
+      const deletedProjectId = ProjectId.make("project-startup-deleted");
+      const dispatchCalls = yield* Ref.make<ReadonlyArray<string>>([]);
+      const targets = yield* resolveAutoBootstrapWelcomeTargets.pipe(
+        Effect.provideService(ServerConfig, {
+          cwd: "/tmp/startup-project",
+          autoBootstrapProjectFromCwd: true,
+        } as never),
+        Effect.provideService(ProjectionSnapshotQuery, {
+          getSnapshot: () => Effect.die("unused"),
+          getShellSnapshot: () => Effect.die("unused"),
+          getCounts: () => Effect.die("unused"),
+          getActiveProjectByWorkspaceRoot: () => Effect.die("unused"),
+          getProjectByWorkspaceRoot: () =>
+            Effect.succeed(
+              Option.some({
+                id: deletedProjectId,
+                title: "Deleted Startup Project",
+                workspaceRoot: "/tmp/startup-project",
+                defaultModelSelection: getAutoBootstrapDefaultModelSelection(),
+                scripts: [],
+                createdAt: "2026-01-01T00:00:00.000Z",
+                updatedAt: "2026-01-02T00:00:00.000Z",
+                deletedAt: "2026-01-03T00:00:00.000Z",
+              }),
+            ),
+          getProjectShellById: () => Effect.die("unused"),
+          getFirstActiveThreadIdByProjectId: () => Effect.die("unused"),
+          getThreadCheckpointContext: () => Effect.succeed(Option.none()),
+          getThreadShellById: () => Effect.die("unused"),
+          getThreadDetailById: () => Effect.die("unused"),
+        }),
+        Effect.provideService(OrchestrationEngineService, {
+          getReadModel: () => Effect.die("unused"),
+          readEvents: () => Stream.empty,
+          dispatch: (command) =>
+            Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
+              Effect.as({ sequence: 1 }),
+            ),
+          streamDomainEvents: Stream.empty,
+        } satisfies OrchestrationEngineShape),
+        Effect.provide(NodeServices.layer),
+      );
+
+      assert.deepStrictEqual(targets, {});
+      assert.deepStrictEqual(yield* Ref.get(dispatchCalls), []);
+    }),
 );

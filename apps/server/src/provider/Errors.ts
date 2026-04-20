@@ -161,3 +161,33 @@ export type ProviderServiceError =
   | ProviderSessionDirectoryPersistenceError
   | ProviderAdapterError
   | CheckpointServiceError;
+
+export function providerErrorDetailFromCause(cause: unknown, fallback: string): string {
+  if (cause instanceof Error) {
+    const message = cause.message.trim();
+    if (message.length > 0) {
+      return message;
+    }
+  }
+
+  if (typeof cause === "string") {
+    const message = cause.trim();
+    if (message.length > 0) {
+      return message;
+    }
+  }
+
+  if (typeof cause === "object" && cause !== null) {
+    const message = Reflect.get(cause, "message");
+    if (typeof message === "string" && message.trim().length > 0) {
+      return message.trim();
+    }
+
+    const tag = Reflect.get(cause, "_tag");
+    if (typeof tag === "string" && tag.trim().length > 0) {
+      return `${fallback} (${tag.trim()})`;
+    }
+  }
+
+  return fallback;
+}

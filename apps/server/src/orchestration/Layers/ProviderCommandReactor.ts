@@ -19,6 +19,7 @@ import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { GitCore } from "../../git/Services/GitCore.ts";
 import { GitStatusBroadcaster } from "../../git/Services/GitStatusBroadcaster.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { TextGeneration } from "../../git/Services/TextGeneration.ts";
@@ -155,6 +156,7 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const git = yield* GitCore;
   const gitStatusBroadcaster = yield* GitStatusBroadcaster;
+  const projectionTurnRepository = yield* ProjectionTurnRepository;
   const textGeneration = yield* TextGeneration;
   const serverSettingsService = yield* ServerSettingsService;
   const handledTurnStartKeys = yield* Cache.make<string, true>({
@@ -204,6 +206,19 @@ const make = Effect.gen(function* () {
       },
       createdAt: input.createdAt,
     });
+
+  const clearPendingTurnStartOnFailure = (threadId: ThreadId) =>
+    projectionTurnRepository.deletePendingTurnStartByThreadId({ threadId }).pipe(
+      Effect.catchCause((cleanupCause) =>
+        Effect.logWarning(
+          "provider command reactor failed to clear pending turn start after failure",
+          {
+            threadId,
+            cause: Cause.pretty(cleanupCause),
+          },
+        ),
+      ),
+    );
 
   const formatFailureDetail = (cause: Cause.Cause<unknown>): string => {
     const failReason = cause.reasons.find(Cause.isFailReason);
@@ -606,11 +621,14 @@ const make = Effect.gen(function* () {
         return Effect.void;
       }
       const detail = formatFailureDetail(cause);
-      return setThreadSessionErrorOnTurnStartFailure({
-        threadId: event.payload.threadId,
-        detail,
-        createdAt: event.payload.createdAt,
-      }).pipe(
+      return clearPendingTurnStartOnFailure(event.payload.threadId).pipe(
+        Effect.flatMap(() =>
+          setThreadSessionErrorOnTurnStartFailure({
+            threadId: event.payload.threadId,
+            detail,
+            createdAt: event.payload.createdAt,
+          }),
+        ),
         Effect.flatMap(() =>
           appendProviderFailureActivity({
             threadId: event.payload.threadId,

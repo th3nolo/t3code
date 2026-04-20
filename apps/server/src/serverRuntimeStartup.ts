@@ -180,7 +180,7 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
 
   if (serverConfig.autoBootstrapProjectFromCwd) {
     yield* Effect.gen(function* () {
-      const existingProject = yield* projectionReadModelQuery.getActiveProjectByWorkspaceRoot(
+      const existingProject = yield* projectionReadModelQuery.getProjectByWorkspaceRoot(
         serverConfig.cwd,
       );
       let nextProjectId: ProjectId;
@@ -200,6 +200,8 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
           defaultModelSelection: nextProjectDefaultModelSelection,
           createdAt,
         });
+      } else if (existingProject.value.deletedAt !== null) {
+        return;
       } else {
         nextProjectId = existingProject.value.id;
         nextProjectDefaultModelSelection =

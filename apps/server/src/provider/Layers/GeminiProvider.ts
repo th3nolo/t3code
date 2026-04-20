@@ -346,6 +346,10 @@ function hasGeminiModelCapabilities(model: Pick<ServerProviderModel, "capabiliti
   );
 }
 
+function normalizeUnknownError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
 const withGeminiAcpProbe = <A, E, R>(input: {
   readonly geminiSettings: GeminiSettings;
   readonly flavorCacheRef?: SynchronizedRef.SynchronizedRef<Map<string, GeminiAcpFlavor>>;
@@ -394,7 +398,7 @@ export const discoverGeminiCapabilitiesViaAcp = (input: {
   readonly cwd?: string;
 }): Effect.Effect<
   ReadonlyArray<ServerProviderModel>,
-  unknown,
+  Error,
   ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem
 > =>
   withGeminiAcpProbe({
@@ -453,14 +457,17 @@ export const discoverGeminiCapabilitiesViaAcp = (input: {
           const targetSlugs = new Set(
             input.existingModels.filter((model) => !model.isCustom).map((model) => model.slug),
           );
-          const probedCapabilities: ReadonlyArray<readonly [string, ModelCapabilities] | undefined> =
-            yield* Effect.forEach(
+          const probedCapabilities: ReadonlyArray<
+            readonly [string, ModelCapabilities] | undefined
+          > = yield* Effect.forEach(
             modelChoices,
             (modelChoice) => {
               const modelSlug = modelChoice.value.trim();
               if (!modelSlug || !targetSlugs.has(modelSlug) || capabilitiesBySlug.has(modelSlug)) {
                 // Not Effect.void — outer forEach filters on `entry !== undefined`.
-                return Effect.succeed<readonly [string, ModelCapabilities] | undefined>(undefined);
+                return Effect.void.pipe(
+                  Effect.as<readonly [string, ModelCapabilities] | undefined>(undefined),
+                );
               }
               return withGeminiAcpProbe({
                 geminiSettings: input.geminiSettings,
@@ -517,7 +524,7 @@ export const discoverGeminiCapabilitiesViaAcp = (input: {
           return caps ? { ...model, capabilities: caps } : model;
         });
       }),
-  });
+  }).pipe(Effect.mapError(normalizeUnknownError));
 
 export const GeminiProviderLive = Layer.effect(
   GeminiProvider,

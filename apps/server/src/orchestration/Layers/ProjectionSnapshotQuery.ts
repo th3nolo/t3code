@@ -218,6 +218,23 @@ function mapProjectShellRow(
   };
 }
 
+function mapProjectLookupRow(
+  row: Schema.Schema.Type<typeof ProjectionProjectLookupRowSchema>,
+  repositoryIdentity: OrchestrationProject["repositoryIdentity"],
+): OrchestrationProject {
+  return {
+    id: row.projectId,
+    title: row.title,
+    workspaceRoot: row.workspaceRoot,
+    repositoryIdentity,
+    defaultModelSelection: row.defaultModelSelection,
+    scripts: row.scripts,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    deletedAt: row.deletedAt,
+  };
+}
+
 function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
   return (cause: unknown): ProjectionRepositoryError =>
     Schema.isSchemaError(cause)
@@ -423,6 +440,27 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           (SELECT COUNT(*) FROM projection_projects) AS "projectCount",
           (SELECT COUNT(*) FROM projection_threads) AS "threadCount"
+      `,
+  });
+
+  const getProjectRowByWorkspaceRoot = SqlSchema.findOneOption({
+    Request: WorkspaceRootLookupInput,
+    Result: ProjectionProjectLookupRowSchema,
+    execute: ({ workspaceRoot }) =>
+      sql`
+        SELECT
+          project_id AS "projectId",
+          title,
+          workspace_root AS "workspaceRoot",
+          default_model_selection_json AS "defaultModelSelection",
+          scripts_json AS "scripts",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt",
+          deleted_at AS "deletedAt"
+        FROM projection_projects
+        WHERE workspace_root = ${workspaceRoot}
+        ORDER BY created_at DESC, project_id ASC
+        LIMIT 1
       `,
   });
 
@@ -1119,23 +1157,38 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         Effect.flatMap((option) =>
           Option.isNone(option)
             ? Effect.succeed(Option.none<OrchestrationProject>())
-            : repositoryIdentityResolver.resolve(option.value.workspaceRoot).pipe(
-                Effect.map((repositoryIdentity) =>
-                  Option.some({
-                    id: option.value.projectId,
-                    title: option.value.title,
-                    workspaceRoot: option.value.workspaceRoot,
-                    repositoryIdentity,
-                    defaultModelSelection: option.value.defaultModelSelection,
-                    scripts: option.value.scripts,
-                    createdAt: option.value.createdAt,
-                    updatedAt: option.value.updatedAt,
-                    deletedAt: option.value.deletedAt,
-                  } satisfies OrchestrationProject),
+            : repositoryIdentityResolver
+                .resolve(option.value.workspaceRoot)
+                .pipe(
+                  Effect.map((repositoryIdentity) =>
+                    Option.some(mapProjectLookupRow(option.value, repositoryIdentity)),
+                  ),
                 ),
-              ),
         ),
       );
+
+  const getProjectByWorkspaceRoot: ProjectionSnapshotQueryShape["getProjectByWorkspaceRoot"] = (
+    workspaceRoot,
+  ) =>
+    getProjectRowByWorkspaceRoot({ workspaceRoot }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getProjectByWorkspaceRoot:query",
+          "ProjectionSnapshotQuery.getProjectByWorkspaceRoot:decodeRow",
+        ),
+      ),
+      Effect.flatMap((option) =>
+        Option.isNone(option)
+          ? Effect.succeed(Option.none<OrchestrationProject>())
+          : repositoryIdentityResolver
+              .resolve(option.value.workspaceRoot)
+              .pipe(
+                Effect.map((repositoryIdentity) =>
+                  Option.some(mapProjectLookupRow(option.value, repositoryIdentity)),
+                ),
+              ),
+      ),
+    );
 
   const getProjectShellById: ProjectionSnapshotQueryShape["getProjectShellById"] = (projectId) =>
     getActiveProjectRowById({ projectId }).pipe(
@@ -1420,6 +1473,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getShellSnapshot,
     getCounts,
     getActiveProjectByWorkspaceRoot,
+    getProjectByWorkspaceRoot,
     getProjectShellById,
     getFirstActiveThreadIdByProjectId,
     getThreadCheckpointContext,

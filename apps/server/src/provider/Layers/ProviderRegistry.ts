@@ -167,7 +167,7 @@ const ProviderRegistryLiveBase = Layer.effect(
         const filePath = cachePathByProvider.get(provider);
         const fallbackProvider = fallbackByProvider.get(provider);
         if (!filePath || !fallbackProvider) {
-          return Effect.succeed(undefined);
+          return Effect.void.pipe(Effect.as<ServerProvider | undefined>(undefined));
         }
         return readProviderStatusCache(filePath).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),

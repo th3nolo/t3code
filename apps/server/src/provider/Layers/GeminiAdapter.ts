@@ -25,7 +25,11 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
+import {
+  ProviderAdapterProcessError,
+  ProviderAdapterValidationError,
+  providerErrorDetailFromCause,
+} from "../Errors.ts";
 import { extractProposedPlanMarkdown } from "../proposedPlan.ts";
 import { tolerateOptionalAcpCall } from "../acp/AcpAdapterSupport.ts";
 import {
@@ -272,11 +276,11 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
     const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
     const flavorCacheRef = yield* SynchronizedRef.make(new Map<string, GeminiAcpFlavor>());
-    const toProcessError = (threadId: ThreadId, cause: { readonly message: string }) =>
+    const toProcessError = (threadId: ThreadId, cause: unknown) =>
       new ProviderAdapterProcessError({
         provider: PROVIDER,
         threadId,
-        detail: cause.message,
+        detail: providerErrorDetailFromCause(cause, "Failed to prepare Gemini ACP session."),
         cause,
       });
 
@@ -562,7 +566,10 @@ function makeGeminiAdapterEffect(options?: AcpAdapterLiveOptions) {
                   new ProviderAdapterProcessError({
                     provider: PROVIDER,
                     threadId: startInput.threadId,
-                    detail: cause.message,
+                    detail: providerErrorDetailFromCause(
+                      cause,
+                      "Failed to start Gemini ACP runtime.",
+                    ),
                     cause,
                   }),
               ),

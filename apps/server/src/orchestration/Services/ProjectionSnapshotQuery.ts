@@ -72,6 +72,13 @@ export interface ProjectionSnapshotQueryShape {
   ) => Effect.Effect<Option.Option<OrchestrationProject>, ProjectionRepositoryError>;
 
   /**
+   * Read the most recently created project (active or deleted) for an exact workspace root match.
+   */
+  readonly getProjectByWorkspaceRoot: (
+    workspaceRoot: string,
+  ) => Effect.Effect<Option.Option<OrchestrationProject>, ProjectionRepositoryError>;
+
+  /**
    * Read a single active project shell row by id.
    */
   readonly getProjectShellById: (

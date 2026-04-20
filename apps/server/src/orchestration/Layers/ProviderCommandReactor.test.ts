@@ -18,6 +18,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@t3tools/contracts";
+import {
+  ProjectionTurnRepository,
+  type ProjectionTurnRepositoryShape,
+} from "../../persistence/Services/ProjectionTurns.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -217,6 +221,8 @@ describe("ProviderCommandReactor", () => {
     );
 
     const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
+    const unsupportedProjectionTurnRepository = () =>
+      Effect.die(new Error("Unsupported projection turn repository call in test")) as never;
     const service: ProviderServiceShape = {
       startSession: startSession as ProviderServiceShape["startSession"],
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
@@ -245,6 +251,18 @@ describe("ProviderCommandReactor", () => {
     );
     const layer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(orchestrationLayer),
+      Layer.provideMerge(
+        Layer.succeed(ProjectionTurnRepository, {
+          upsertByTurnId: unsupportedProjectionTurnRepository,
+          replacePendingTurnStart: unsupportedProjectionTurnRepository,
+          getPendingTurnStartByThreadId: unsupportedProjectionTurnRepository,
+          deletePendingTurnStartByThreadId: () => Effect.void,
+          listByThreadId: unsupportedProjectionTurnRepository,
+          getByTurnId: unsupportedProjectionTurnRepository,
+          clearCheckpointTurnConflict: unsupportedProjectionTurnRepository,
+          deleteByThreadId: unsupportedProjectionTurnRepository,
+        } satisfies ProjectionTurnRepositoryShape),
+      ),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
       Layer.provideMerge(Layer.succeed(GitCore, { renameBranch } as unknown as GitCoreShape)),
       Layer.provideMerge(
@@ -355,6 +373,56 @@ describe("ProviderCommandReactor", () => {
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("surfaces first-turn session start failures without leaving a bound session", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+    harness.startSession.mockImplementationOnce(
+      (_: unknown, __: unknown) =>
+        Effect.fail(new Error("simulated session start failure")) as never,
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-session-failure"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-session-failure"),
+          role: "user",
+          text: "hello failing provider",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await Effect.runPromise(harness.engine.getReadModel());
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return (
+        thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ??
+        false
+      );
+    });
+
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+
+    const readModel = await Effect.runPromise(harness.engine.getReadModel());
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.session).toBeNull();
+    expect(
+      thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed"),
+    ).toMatchObject({
+      summary: "Provider turn start failed",
+      payload: {
+        detail: expect.stringContaining("simulated session start failure"),
+      },
+    });
   });
 
   it("generates a thread title on the first turn", async () => {

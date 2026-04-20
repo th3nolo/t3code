@@ -135,6 +135,7 @@ const PROVIDER_SETTINGS: readonly InstallProviderSettings[] = [
   {
     provider: "gemini",
     title: "Gemini",
+    badgeLabel: "Early Access",
     binaryPlaceholder: "Gemini binary path",
     binaryDescription: "Path to the Gemini binary",
   },
