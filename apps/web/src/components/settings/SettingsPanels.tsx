@@ -47,6 +47,7 @@ import {
   getCustomModelOptionsByProvider,
   resolveAppModelSelectionState,
 } from "../../modelSelection";
+import { formatAppModelOptionName } from "../../providerModelNames";
 import { ensureLocalApi, readLocalApi } from "../../localApi";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -782,7 +783,7 @@ export function GeneralSettingsPanel() {
       liveProvider?.models ??
       providerConfig.customModels.map((slug) => ({
         slug,
-        name: slug,
+        name: formatAppModelOptionName(providerSettings.provider, slug),
         isCustom: true,
         capabilities: null,
       }));

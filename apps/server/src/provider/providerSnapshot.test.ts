@@ -31,4 +31,37 @@ describe("providerModelsFromSettings", () => {
       },
     ]);
   });
+
+  it("formats custom model names when requested", () => {
+    const models = providerModelsFromSettings(
+      [],
+      "gemini",
+      ["gemini-2.5-flash"],
+      {
+        reasoningEffortLevels: [],
+        supportsFastMode: false,
+        supportsThinkingToggle: false,
+        contextWindowOptions: [],
+        promptInjectedEffortLevels: [],
+      },
+      {
+        formatCustomModelName: (slug) => `Formatted ${slug}`,
+      },
+    );
+
+    expect(models).toEqual([
+      {
+        slug: "gemini-2.5-flash",
+        name: "Formatted gemini-2.5-flash",
+        isCustom: true,
+        capabilities: {
+          reasoningEffortLevels: [],
+          supportsFastMode: false,
+          supportsThinkingToggle: false,
+          contextWindowOptions: [],
+          promptInjectedEffortLevels: [],
+        },
+      },
+    ]);
+  });
 });

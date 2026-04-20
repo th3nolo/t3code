@@ -9,6 +9,7 @@ import {
   normalizeModelSlug,
   resolveSelectableModel,
 } from "@t3tools/shared/model";
+import { formatAppModelOptionName } from "./providerModelNames";
 import { getComposerProviderState } from "./components/chat/composerProviderRegistry";
 import { UnifiedSettings } from "@t3tools/contracts/settings";
 import {
@@ -138,7 +139,7 @@ export function getAppModelOptions(
     seen.add(slug);
     options.push({
       slug,
-      name: slug,
+      name: formatAppModelOptionName(provider, slug),
       isCustom: true,
     });
   }
@@ -154,7 +155,7 @@ export function getAppModelOptions(
   ) {
     options.push({
       slug: normalizedSelectedModel,
-      name: normalizedSelectedModel,
+      name: formatAppModelOptionName(provider, normalizedSelectedModel),
       isCustom: true,
     });
   }

@@ -18,6 +18,14 @@ export interface SelectableModelOption {
   name: string;
 }
 
+export const EMPTY_MODEL_CAPABILITIES: ModelCapabilities = {
+  reasoningEffortLevels: [],
+  supportsFastMode: false,
+  supportsThinkingToggle: false,
+  contextWindowOptions: [],
+  promptInjectedEffortLevels: [],
+};
+
 /** Check whether a capabilities object includes a given effort value. */
 export function hasEffortLevel(caps: ModelCapabilities, value: string): boolean {
   return caps.reasoningEffortLevels.some((l) => l.value === value);

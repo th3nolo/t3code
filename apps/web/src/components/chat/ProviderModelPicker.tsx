@@ -9,6 +9,7 @@ import { ChevronDownIcon } from "lucide-react";
 import { Button, buttonVariants } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { providerIconClassName } from "../providerBrandClassNames";
 import { cn } from "~/lib/utils";
 import { ModelPickerContent } from "./ModelPickerContent";
 import {
@@ -105,7 +106,11 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         >
           <ProviderIcon
             aria-hidden="true"
-            className={cn("size-4 shrink-0", props.activeProviderIconClassName)}
+            className={cn(
+              "size-4 shrink-0",
+              providerIconClassName(activeProvider, ""),
+              props.activeProviderIconClassName,
+            )}
           />
           <Tooltip>
             <TooltipTrigger

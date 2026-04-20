@@ -140,7 +140,10 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Record<ProviderKind, Record<string,
     "claude-haiku-4.5": "claude-haiku-4-5",
     "claude-haiku-4-5-20251001": "claude-haiku-4-5",
   },
-  gemini: {},
+  gemini: {
+    "auto-gemini-3": "auto",
+    "gemini-3-pro-preview": "gemini-3.1-pro-preview",
+  },
   opencode: {},
   cursor: {
     composer: "composer-2",

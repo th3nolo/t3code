@@ -49,6 +49,8 @@ describe("normalizeModelSlug", () => {
     expect(normalizeModelSlug("gpt-5-codex")).toBe("gpt-5.4");
     expect(normalizeModelSlug("5.3")).toBe("gpt-5.3-codex");
     expect(normalizeModelSlug("sonnet", "claudeAgent")).toBe("claude-sonnet-4-6");
+    expect(normalizeModelSlug("auto-gemini-3", "gemini")).toBe("auto");
+    expect(normalizeModelSlug("gemini-3-pro-preview", "gemini")).toBe("gemini-3.1-pro-preview");
   });
 
   it("returns null for empty or missing values", () => {

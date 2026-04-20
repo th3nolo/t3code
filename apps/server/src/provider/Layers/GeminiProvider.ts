@@ -6,6 +6,7 @@ import type {
   ServerProviderModel,
   ServerSettingsError,
 } from "@t3tools/contracts";
+import { formatGeminiModelDisplayName } from "@t3tools/shared/gemini";
 import {
   Cause,
   Effect,
@@ -109,6 +110,22 @@ export function getGeminiBuiltInModels(): ReadonlyArray<ServerProviderModel> {
   return BUILT_IN_MODELS;
 }
 
+function providerModelsFromGeminiSettings(
+  builtInModels: ReadonlyArray<ServerProviderModel>,
+  customModels: ReadonlyArray<string>,
+  customModelCapabilities: ModelCapabilities,
+): ReadonlyArray<ServerProviderModel> {
+  return providerModelsFromSettings(
+    builtInModels,
+    PROVIDER,
+    customModels,
+    customModelCapabilities,
+    {
+      formatCustomModelName: formatGeminiModelDisplayName,
+    },
+  );
+}
+
 function geminiAuthLabel(method: string | undefined): ServerProviderAuth {
   switch (method) {
     case "gemini-api-key":
@@ -138,9 +155,8 @@ function geminiAuthLabel(method: string | undefined): ServerProviderAuth {
 
 function buildInitialGeminiSnapshot(geminiSettings: GeminiSettings): ServerProvider {
   const checkedAt = new Date().toISOString();
-  const models = providerModelsFromSettings(
+  const models = providerModelsFromGeminiSettings(
     BUILT_IN_MODELS,
-    PROVIDER,
     geminiSettings.customModels,
     EMPTY_CAPABILITIES,
   );
@@ -198,9 +214,8 @@ export const checkGeminiProviderStatus = Effect.fn("checkGeminiProviderStatus")(
       Effect.map((settings) => settings.providers.gemini),
     );
     const checkedAt = new Date().toISOString();
-    const models = providerModelsFromSettings(
+    const models = providerModelsFromGeminiSettings(
       BUILT_IN_MODELS,
-      PROVIDER,
       geminiSettings.customModels,
       EMPTY_CAPABILITIES,
     );
@@ -580,9 +595,8 @@ export const GeminiProviderLive = Layer.effect(
           if (enriched.length === 0) return;
           yield* publishSnapshot({
             ...snapshot,
-            models: providerModelsFromSettings(
+            models: providerModelsFromGeminiSettings(
               enriched,
-              PROVIDER,
               settings.customModels,
               EMPTY_CAPABILITIES,
             ),

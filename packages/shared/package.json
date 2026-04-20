@@ -8,6 +8,10 @@
       "types": "./src/model.ts",
       "import": "./src/model.ts"
     },
+    "./gemini": {
+      "types": "./src/gemini.ts",
+      "import": "./src/gemini.ts"
+    },
     "./git": {
       "types": "./src/git.ts",
       "import": "./src/git.ts"
