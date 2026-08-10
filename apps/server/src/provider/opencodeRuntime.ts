@@ -684,6 +684,16 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
           Effect.exit,
         );
 
+      // The v2 preview CLI depends on a background service that may not be
+      // running when the CLI is spawned non-interactively; `service start` is
+      // idempotent (exit 0 when already running) and a fast no-op failure on
+      // v1, which has no such subcommand.
+      yield* runOpenCodeCommand({
+        binaryPath: input.binaryPath,
+        args: ["service", "start"],
+        ...env,
+      }).pipe(Effect.exit);
+
       // First attempt — run both in parallel
       let [modelsResult, agentsResult] = yield* Effect.all([runModelsCli(), runAgentsCli()], {
         concurrency: "unbounded",
