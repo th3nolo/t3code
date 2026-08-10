@@ -21,7 +21,21 @@ track the CLI build — ignore it).
 | Model **list** (inventory) | ✅ done, via CLI `models` | `opencodeRuntime.ts` `loadInventoryFromCli` |
 | Version **advisory** (no false "update" nag) | ✅ done | `providerMaintenance.ts` |
 | Background **service** auto-start before probes | ✅ done | `opencodeRuntime.ts` |
-| **Chat** (sessions/prompt/streaming) | 🟡 **built, needs live-UI validation** | `opencode2CompatAdapter.ts` |
+| **Chat** (sessions/prompt/streaming) | ✅ **full turn verified** (SDK+adapter integration) | `opencode2CompatAdapter.ts` |
+
+The adapter now handles the full chat lifecycle, verified end to end against
+`v0.0.0-next-17088` by driving T3's exact SDK call shapes through the real
+bundled `@opencode-ai/sdk/v2` + a spawned server (create → switchModel → prompt
+→ streamed reply → turn complete, with Kimi K3). Beyond the route rewrite +
+auth + event translation, chat required three more shims discovered only by
+running it: (1) unwrap v2's `{data:…}` envelope for single-object session
+responses so `result.data.id` resolves; (2) the bundled SDK POSTs prompts to
+`/session/{id}/message` while v2's endpoint is `POST /session/{id}/prompt` with
+body `{text}` — redirect the path and reshape `parts`→`text`; (3) v2 ignores a
+model in the prompt body, so pre-flight `POST /session/{id}/model` (switchModel)
+from the prompt's model. `mcp.add` (T3's tool callback) is made non-fatal —
+v2's MCP add is `PUT /api/mcp/{server}`, unlike the SDK's `POST /mcp`; chat
+proceeds with OpenCode's built-in tools.
 
 Raw chat **works** against opencode2 — verified end to end at the HTTP level
 (create session → prompt free model → assistant reply received). The

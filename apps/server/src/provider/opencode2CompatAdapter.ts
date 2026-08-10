@@ -2,20 +2,18 @@
  * OpenCode v2 (opencode2) beta compatibility adapter.
  *
  * The bundled `@opencode-ai/sdk/v2` targets an older wire protocol than the
- * live opencode2 preview server: routes moved under `/api/*`, every request
- * needs HTTP Basic auth, and several payload shapes were redesigned. This
- * module provides a `fetch` wrapper (the one hook hey-api's client exposes)
- * that bridges the gap without touching T3's call sites.
+ * live opencode2 preview server: routes moved under `/api/*`, requests need
+ * HTTP Basic auth, request/response payload shapes were redesigned, and some
+ * operations moved endpoint (notably prompt). This module provides a `fetch`
+ * wrapper (the one hook hey-api's client exposes) that bridges the gap without
+ * touching T3's call sites.
  *
- * See `docs/opencode2-beta-compat.md` for the full protocol map, the shapes
- * behind each transform here, and the repair playbook. opencode2 is a
- * fast-moving beta — EVERY transform is fail-open: on an unrecognized shape it
- * returns the input untouched, so drift degrades gracefully instead of
- * crashing chat.
+ * See `docs/opencode2-beta-compat.md` for the full protocol map and repair
+ * playbook. opencode2 is a fast-moving beta — transforms are fail-open where
+ * possible: on an unrecognized shape they return the input untouched.
  *
- * Status: path rewrite + auth + provider/message response reshaping are
- * validated against `v0.0.0-next-17086`. The SSE event-stream translation
- * (`/api/event`) is the remaining work — see `translateEventStream`.
+ * Validated end to end (create -> switchModel -> prompt -> streamed reply ->
+ * turn complete) against `v0.0.0-next-17088` through T3's exact SDK call shapes.
  */
 
 const API_PREFIX = "/api";
@@ -45,116 +43,7 @@ export interface Opencode2CompatOptions {
   readonly password?: string | null;
 }
 
-/**
- * Wrap a base `fetch` so requests from the v1-era SDK reach the v2 server:
- * rewrite the path under /api, inject Basic auth, and reshape the response
- * body for the routes T3 consumes.
- */
-export function createOpencode2Fetch(
-  baseFetch: typeof fetch,
-  options: Opencode2CompatOptions = {},
-): typeof fetch {
-  // v2 servers require Basic auth; v1 servers have none. Use password presence
-  // as the v2 signal: with no password, return the base fetch untouched so a
-  // v1 (or external unauthenticated) server sees no path rewrite or reshaping.
-  if (options.password == null || options.password.length === 0) {
-    return baseFetch;
-  }
-  const authHeader = `Basic ${Buffer.from(`opencode:${options.password}`, "utf8").toString("base64")}`;
-
-  return async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-    const originalUrl = input instanceof Request ? input.url : String(input);
-
-    let targetUrl = originalUrl;
-    let rewrittenPathname: string | null = null;
-    try {
-      const url = new URL(originalUrl);
-      if (shouldRewrite(url.pathname)) {
-        rewrittenPathname = `${API_PREFIX}${url.pathname}`;
-        url.pathname = rewrittenPathname;
-        targetUrl = url.toString();
-      }
-    } catch {
-      // Non-absolute URL — leave it alone.
-    }
-
-    // Rebuild the request with the rewritten URL and injected auth. Use
-    // globalThis.Headers explicitly: the server bundle imports Effect's
-    // `Headers` (a non-constructor module object) at top scope, which would
-    // otherwise shadow the web global here ("Headers is not a constructor").
-    const headers = new globalThis.Headers(
-      input instanceof Request ? input.headers : (init?.headers as HeadersInit | undefined),
-    );
-    if (authHeader && !headers.has("authorization")) {
-      headers.set("authorization", authHeader);
-    }
-
-    const response =
-      input instanceof Request
-        ? await baseFetch(new Request(targetUrl, input), { ...init, headers })
-        : await baseFetch(targetUrl, { ...init, headers });
-
-    if (rewrittenPathname === null) return response;
-    return reshapeResponse(rewrittenPathname, response);
-  };
-}
-
-/**
- * Reshape a v2 response body into the shape T3's SDK/adapter expects.
- * Fail-open: anything we don't specifically recognize is returned untouched.
- */
-async function reshapeResponse(pathname: string, response: Response): Promise<Response> {
-  const contentType = response.headers.get("content-type") ?? "";
-
-  // Leave streams (SSE) to the dedicated translator.
-  if (pathname === `${API_PREFIX}/event`) return translateEventStream(response);
-  if (!contentType.includes("application/json")) return response;
-
-  let body: unknown;
-  try {
-    body = await response.clone().json();
-  } catch {
-    return response;
-  }
-
-  const transformed = transformJsonBody(pathname, body);
-  if (transformed === undefined) return response;
-
-  return new Response(JSON.stringify(transformed), {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  });
-}
-
-/**
- * Pure JSON body transforms, keyed by route. Returns `undefined` to mean
- * "no transform — use the original response". Exported for unit testing.
- */
-export function transformJsonBody(pathname: string, body: unknown): unknown {
-  // GET /api/session/{id}/message — flat v2 messages → v1 { info, parts }.
-  if (/\/api\/session\/[^/]+\/message$/.test(pathname)) {
-    const data = (body as { data?: unknown })?.data;
-    if (Array.isArray(data)) {
-      return { ...(body as object), data: data.map(toV1Message) };
-    }
-    return undefined;
-  }
-
-  // GET /api/provider — v2 { location, data:[…] } → v1 { all, connected, default }.
-  // NOTE: v2 providers carry no models here; models come from the CLI `models`
-  // path. This mapping only keeps the SDK inventory call from throwing.
-  if (pathname === `${API_PREFIX}/provider`) {
-    const data = (body as { data?: unknown })?.data;
-    if (Array.isArray(data)) {
-      const all = data.map((p) => ({ ...(p as object), models: (p as { models?: unknown }).models ?? {} }));
-      return { all, connected: all.map((p: { id?: string }) => p.id).filter(Boolean), default: {} };
-    }
-    return undefined;
-  }
-
-  return undefined;
-}
+// --- response reshaping ------------------------------------------------------
 
 /** v2 flat message → v1 { info, parts }. */
 function toV1Message(message: unknown): unknown {
@@ -166,29 +55,64 @@ function toV1Message(message: unknown): unknown {
     [k: string]: unknown;
   };
   if (!m || typeof m !== "object") return message;
-
   const role = m.type; // v2 uses `type` where v1 used `info.role`
   let parts: Array<{ type: string; text?: string }>;
-  if (Array.isArray(m.content)) {
-    // assistant: reply lives in content[] items (text | reasoning)
-    parts = m.content.map((c) => ({ type: c.type ?? "text", text: c.text }));
-  } else if (typeof m.text === "string") {
-    // user/system: single text part
-    parts = [{ type: "text", text: m.text }];
-  } else {
-    parts = [];
-  }
-
+  if (Array.isArray(m.content)) parts = m.content.map((c) => ({ type: c.type ?? "text", text: c.text }));
+  else if (typeof m.text === "string") parts = [{ type: "text", text: m.text }];
+  else parts = [];
   const { content: _c, text: _t, type: _ty, ...rest } = m;
   return { info: { ...rest, id: m.id, role }, parts };
 }
 
 /**
- * Synthesize a stable v1 `partID` from v2's `(assistantMessageID, kind,
- * ordinal)` triple. v2 streams have no part identity of their own; T3's reducer
- * keys everything on `partID`, so start/delta/end for one content run must all
- * resolve to the same id.
+ * Reshape a v2 JSON response body into the shape T3's SDK/adapter expects,
+ * keyed by (method, path). Returns `undefined` to mean "no transform". Exported
+ * for unit testing.
  */
+export function transformJsonBody(method: string, pathname: string, body: unknown): unknown {
+  // GET /api/provider — v2 { location, data:[…] } → v1 { all, connected, default }.
+  // (models come from the CLI path; this keeps the SDK inventory call from throwing.)
+  if (method === "GET" && pathname === `${API_PREFIX}/provider`) {
+    const data = (body as { data?: unknown })?.data;
+    if (Array.isArray(data)) {
+      const all = data.map((p) => ({ ...(p as object), models: (p as { models?: unknown }).models ?? {} }));
+      return { all, connected: all.map((p: { id?: string }) => p.id).filter(Boolean), default: {} };
+    }
+    return undefined;
+  }
+  // GET /api/session/{id}/message — flat v2 messages → bare array of v1 { info, parts }.
+  // T3 reads `result.data` as the array (see session.messages consumers).
+  if (method === "GET" && /\/api\/session\/[^/]+\/message$/.test(pathname)) {
+    const data = (body as { data?: unknown })?.data;
+    if (Array.isArray(data)) return data.map(toV1Message);
+    return undefined;
+  }
+  // Single-object session endpoints (create/get): unwrap v2's { data: X } envelope
+  // to X, so T3 reads `result.data.id` etc. Skip list responses (they carry cursor).
+  if (
+    /\/api\/session(\/[^/]+)?$/.test(pathname) &&
+    body &&
+    typeof body === "object" &&
+    "data" in (body as object) &&
+    !("cursor" in (body as object))
+  ) {
+    return (body as { data: unknown }).data;
+  }
+  return undefined;
+}
+
+// --- request reshaping -------------------------------------------------------
+
+function extractText(parts: unknown): string {
+  if (!Array.isArray(parts)) return "";
+  return parts
+    .filter((p) => p && p.type === "text" && typeof p.text === "string")
+    .map((p) => p.text)
+    .join("");
+}
+
+// --- event stream translation ------------------------------------------------
+
 function partId(messageID: string, kind: "text" | "reasoning", ordinal: number): string {
   return `${messageID}::${kind}::${ordinal}`;
 }
@@ -196,11 +120,9 @@ function partId(messageID: string, kind: "text" | "reasoning", ordinal: number):
 /**
  * Map a single v2 `session.*` event to zero or more v1 events (`{type,
  * properties}`) that T3's OpenCodeAdapter switch understands. `startTimes`
- * carries per-part start timestamps across events in the stream so `*.ended`
- * can emit a `time: {start, end}` — the final text part MUST carry `time.end`
- * or T3 never marks the assistant turn complete.
- *
- * Exported for unit testing. Fail-open: unmapped event types return [].
+ * carries per-part start timestamps so `*.ended` can emit `time: {start, end}`
+ * — the final text part MUST carry `time.end` or T3 never completes the turn.
+ * Exported for unit testing.
  */
 export function translateEvent(
   event: { type?: string; created?: number; data?: Record<string, unknown> },
@@ -223,15 +145,15 @@ export function translateEvent(
       },
     ];
   };
-  const partDelta = (kind: "text" | "reasoning") => {
-    if (!messageID || !sessionID) return [];
-    return [
-      {
-        type: "message.part.delta",
-        properties: { sessionID, partID: partId(messageID, kind, ordinal), delta: String(d.delta ?? "") },
-      },
-    ];
-  };
+  const partDelta = (kind: "text" | "reasoning") =>
+    !messageID || !sessionID
+      ? []
+      : [
+          {
+            type: "message.part.delta",
+            properties: { sessionID, partID: partId(messageID, kind, ordinal), delta: String(d.delta ?? "") },
+          },
+        ];
   const partEnded = (kind: "text" | "reasoning") => {
     if (!messageID || !sessionID) return [];
     const id = partId(messageID, kind, ordinal);
@@ -257,8 +179,6 @@ export function translateEvent(
     case "session.execution.started":
       return status({ type: "busy" });
     case "session.step.started":
-      // Register the assistant message role before any of its parts arrive, so
-      // messageRoleForPart resolves "assistant" and deltas are emitted.
       return messageID && sessionID
         ? [{ type: "message.updated", properties: { sessionID, info: { id: messageID, role: "assistant" } } }]
         : [];
@@ -286,31 +206,16 @@ export function translateEvent(
         ...status({ type: "idle" }),
       ];
     default:
-      // server.connected, session.input.*, session.instructions.updated,
-      // session.step.ended, session.usage.updated, etc. — no v1 equivalent
-      // T3 needs; drop them.
       return [];
   }
 }
 
-/**
- * Translate the v2 `session.*` SSE stream into the v1 events T3's reducer
- * consumes, re-framed as Server-Sent Events. Fail-open: any line we can't
- * parse or map is dropped rather than breaking the stream.
- *
- * See `docs/opencode2-beta-compat.md` for the full event mapping table. This is
- * the load-bearing piece for live streaming chat and the most drift-prone —
- * re-capture the event payloads and re-verify `translateEvent` after an
- * opencode2 update.
- */
 function translateEventStream(response: Response): Response {
   if (!response.body) return response;
-
   const startTimes = new Map<string, number>();
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
-
   const emit = (controller: { enqueue: (chunk: Uint8Array) => void }, frame: string) => {
     const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
     if (!dataLine) return;
@@ -324,7 +229,6 @@ function translateEventStream(response: Response): Response {
       controller.enqueue(encoder.encode(`data: ${JSON.stringify(v1Event)}\n\n`));
     }
   };
-
   const transform = new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       buffer += decoder.decode(chunk, { stream: true });
@@ -339,10 +243,117 @@ function translateEventStream(response: Response): Response {
       if (buffer.trim().length > 0) emit(controller, buffer);
     },
   });
-
   return new Response(response.body.pipeThrough(transform), {
     status: response.status,
     statusText: response.statusText,
     headers: response.headers,
   });
+}
+
+async function reshapeResponse(method: string, pathname: string, response: Response): Promise<Response> {
+  if (pathname === `${API_PREFIX}/event`) return translateEventStream(response);
+  if (!(response.headers.get("content-type") ?? "").includes("application/json")) return response;
+  let body: unknown;
+  try {
+    body = await response.clone().json();
+  } catch {
+    return response;
+  }
+  const transformed = transformJsonBody(method, pathname, body);
+  if (transformed === undefined) return response;
+  return new Response(JSON.stringify(transformed), {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
+/**
+ * Wrap a base `fetch` so the v1-era SDK reaches the v2 server: rewrite paths
+ * under /api, inject Basic auth, translate the prompt request, and reshape
+ * responses + the SSE event stream. Pure pass-through when no password is
+ * present (v2 requires auth; v1 has none, so password presence is the v2
+ * signal), leaving v1/unauthenticated servers untouched.
+ */
+export function createOpencode2Fetch(
+  baseFetch: typeof fetch,
+  options: Opencode2CompatOptions = {},
+): typeof fetch {
+  if (options.password == null || options.password.length === 0) return baseFetch;
+  const authHeader = `Basic ${Buffer.from(`opencode:${options.password}`, "utf8").toString("base64")}`;
+
+  return async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const isReq = input instanceof Request;
+    const originalUrl = isReq ? input.url : String(input);
+    const method = ((isReq ? input.method : init?.method) ?? "GET").toUpperCase();
+
+    let targetUrl = originalUrl;
+    let pathname: string | null = null;
+    let search = "";
+    try {
+      const url = new globalThis.URL(originalUrl);
+      if (shouldRewrite(url.pathname)) {
+        url.pathname = `${API_PREFIX}${url.pathname}`;
+        targetUrl = url.toString();
+      }
+      pathname = url.pathname;
+      search = url.search;
+    } catch {
+      // non-absolute URL — leave it alone
+    }
+
+    const headers = new globalThis.Headers(
+      isReq ? input.headers : (init?.headers as HeadersInit | undefined),
+    );
+    if (!headers.has("authorization")) headers.set("authorization", authHeader);
+
+    let bodyText: string | undefined;
+    if (isReq) {
+      try {
+        bodyText = await input.clone().text();
+      } catch {
+        /* no body */
+      }
+    } else if (init?.body != null && typeof init.body === "string") {
+      bodyText = init.body;
+    }
+
+    // Prompt translation: the bundled SDK POSTs prompts to /session/{id}/message;
+    // v2's prompt endpoint is POST /session/{id}/prompt with body {text}. v2 also
+    // ignores a model in the prompt body, so switch the model first.
+    if (method === "POST" && pathname && /\/api\/session\/[^/]+\/message$/.test(pathname)) {
+      let obj: { model?: unknown; text?: string; parts?: unknown } = {};
+      try {
+        obj = bodyText ? JSON.parse(bodyText) : {};
+      } catch {
+        /* keep {} */
+      }
+      const sid = pathname.split("/")[3];
+      const origin = new globalThis.URL(targetUrl).origin;
+      if (obj.model) {
+        try {
+          await baseFetch(`${origin}${API_PREFIX}/session/${sid}/model${search}`, {
+            method: "POST",
+            headers: new globalThis.Headers({ authorization: authHeader, "content-type": "application/json" }),
+            body: JSON.stringify({ model: obj.model }),
+          });
+        } catch {
+          /* best-effort model switch */
+        }
+      }
+      bodyText = JSON.stringify({ text: obj.text ?? extractText(obj.parts) });
+      headers.set("content-type", "application/json");
+      const url = new globalThis.URL(targetUrl);
+      url.pathname = url.pathname.replace(/\/message$/, "/prompt");
+      targetUrl = url.toString();
+      pathname = url.pathname;
+    }
+
+    const sendInit: RequestInit = { ...(isReq ? {} : init), method, headers };
+    if (bodyText !== undefined && method !== "GET" && method !== "HEAD") sendInit.body = bodyText;
+
+    const response = await baseFetch(targetUrl, sendInit);
+    if (pathname === null) return response;
+    return reshapeResponse(method, pathname, response);
+  };
 }

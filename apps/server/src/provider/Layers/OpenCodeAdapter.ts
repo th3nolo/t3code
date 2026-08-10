@@ -1226,6 +1226,10 @@ export function makeOpenCodeAdapter(
               });
               const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
               if (mcpSession && !server.external) {
+                // Best-effort: the v2 preview's MCP registration differs
+                // (PUT /api/mcp/{server}) from the bundled SDK's POST /mcp, and
+                // MCP tool callback is a secondary feature — never fail session
+                // start over it. Chat proceeds with OpenCode's built-in tools.
                 yield* runOpenCodeSdk("mcp.add", () =>
                   client.mcp.add({
                     name: "t3-code",
@@ -1238,7 +1242,7 @@ export function makeOpenCodeAdapter(
                       oauth: false,
                     },
                   }),
-                );
+                ).pipe(Effect.ignore);
               }
               // Resume: re-adopt the session named by the durable cursor —
               // OpenCode scopes history by session id. The probe recovers only

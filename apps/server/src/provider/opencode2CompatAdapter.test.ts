@@ -29,19 +29,19 @@ const providerBody = {
 };
 
 describe("opencode2CompatAdapter.transformJsonBody", () => {
-  it("maps flat v2 messages to v1 { info, parts }", () => {
-    const out = transformJsonBody("/api/session/ses_1/message", {
+  it("maps flat v2 messages to a bare array of v1 { info, parts }", () => {
+    const out = transformJsonBody("GET", "/api/session/ses_1/message", {
       data: [userMsg, assistantMsg],
       cursor: {},
-    }) as { data: Array<{ info: Record<string, unknown>; parts: Array<{ type: string; text?: string }> }> };
+    }) as Array<{ info: Record<string, unknown>; parts: Array<{ type: string; text?: string }> }>;
 
-    NodeAssert.equal(out.data.length, 2);
+    NodeAssert.equal(out.length, 2);
 
-    const user = out.data[0]!;
+    const user = out[0]!;
     NodeAssert.equal(user.info.role, "user");
     NodeAssert.deepEqual(user.parts, [{ type: "text", text: "Say PONG" }]);
 
-    const assistant = out.data[1]!;
+    const assistant = out[1]!;
     NodeAssert.equal(assistant.info.role, "assistant");
     NodeAssert.equal(assistant.info.agent, "build");
     NodeAssert.equal(assistant.parts.length, 2);
@@ -54,7 +54,7 @@ describe("opencode2CompatAdapter.transformJsonBody", () => {
   });
 
   it("maps v2 provider list to v1 { all, connected, default }", () => {
-    const out = transformJsonBody("/api/provider", providerBody) as {
+    const out = transformJsonBody("GET", "/api/provider", providerBody) as {
       all: Array<{ id: string; models: unknown }>;
       connected: Array<string>;
       default: object;
@@ -65,10 +65,21 @@ describe("opencode2CompatAdapter.transformJsonBody", () => {
     NodeAssert.deepEqual(out.default, {});
   });
 
+  it("unwraps the { data } envelope for single-object session responses", () => {
+    const out = transformJsonBody("POST", "/api/session", { data: { id: "ses_1", title: "t" } }) as {
+      id: string;
+    };
+    NodeAssert.equal(out.id, "ses_1");
+    // list responses (with cursor) are left alone
+    NodeAssert.equal(
+      transformJsonBody("GET", "/api/session", { data: [{ id: "ses_1" }], cursor: {} }),
+      undefined,
+    );
+  });
+
   it("is fail-open: unrecognized shapes/paths return undefined", () => {
-    NodeAssert.equal(transformJsonBody("/api/session", { data: { id: "ses_1" } }), undefined);
-    NodeAssert.equal(transformJsonBody("/api/provider", { unexpected: true }), undefined);
-    NodeAssert.equal(transformJsonBody("/api/session/ses_1/message", { data: "oops" }), undefined);
+    NodeAssert.equal(transformJsonBody("GET", "/api/provider", { unexpected: true }), undefined);
+    NodeAssert.equal(transformJsonBody("GET", "/api/session/ses_1/message", { data: "oops" }), undefined);
   });
 });
 
