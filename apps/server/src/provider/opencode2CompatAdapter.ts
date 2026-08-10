@@ -318,10 +318,12 @@ export function createOpencode2Fetch(
       bodyText = init.body;
     }
 
-    // Prompt translation: the bundled SDK POSTs prompts to /session/{id}/message;
-    // v2's prompt endpoint is POST /session/{id}/prompt with body {text}. v2 also
-    // ignores a model in the prompt body, so switch the model first.
-    if (method === "POST" && pathname && /\/api\/session\/[^/]+\/message$/.test(pathname)) {
+    // Prompt translation: the bundled SDK POSTs session.prompt to
+    // /session/{id}/message and session.promptAsync (the chat path) to
+    // /session/{id}/prompt_async; v2's prompt endpoint is POST
+    // /session/{id}/prompt with body {text}. v2 also ignores a model in the
+    // prompt body, so switch the model first.
+    if (method === "POST" && pathname && /\/api\/session\/[^/]+\/(message|prompt_async)$/.test(pathname)) {
       let obj: { model?: unknown; text?: string; parts?: unknown } = {};
       try {
         obj = bodyText ? JSON.parse(bodyText) : {};
@@ -344,7 +346,7 @@ export function createOpencode2Fetch(
       bodyText = JSON.stringify({ text: obj.text ?? extractText(obj.parts) });
       headers.set("content-type", "application/json");
       const url = new globalThis.URL(targetUrl);
-      url.pathname = url.pathname.replace(/\/message$/, "/prompt");
+      url.pathname = url.pathname.replace(/\/(message|prompt_async)$/, "/prompt");
       targetUrl = url.toString();
       pathname = url.pathname;
     }
