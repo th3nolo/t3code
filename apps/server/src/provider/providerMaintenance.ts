@@ -379,6 +379,11 @@ function deriveVersionAdvisory(input: {
   readonly currentVersion: string | null;
   readonly latestVersion: string | null;
 }): Pick<ServerProviderVersionAdvisory, "status" | "message"> {
+  // OpenCode v2 preview builds version as 0.0.0-<channel>-<build>; comparing
+  // them against the stable latest would nag "update available" forever.
+  if (input.currentVersion && /^0\.0\.0-(?:next|beta|dev|tui-v2)-/.test(input.currentVersion)) {
+    return { status: "current", message: null };
+  }
   if (!input.currentVersion) {
     return { status: "unknown", message: null };
   }

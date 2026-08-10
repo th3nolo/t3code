@@ -705,33 +705,49 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         agentsResult = a2;
       }
 
-      if (modelsResult._tag === "Failure") {
-        const cause = Cause.squash(modelsResult.cause);
-        return yield* ensureRuntimeError(
-          "loadInventoryFromCli",
-          `Failed to load OpenCode models: ${openCodeRuntimeErrorDetail(cause)}`,
-          cause,
-        );
+      // The v2 preview CLI does not know `--verbose` (it prints help with exit
+      // 0) and may fail outright while its background service is unavailable.
+      // When the verbose invocation fails or parses to zero providers, fall
+      // back to plain `models`, then `models --standalone` (which runs a
+      // private server instead of the background service).
+      let parsed: ReturnType<typeof parseModelsCliOutput> | null = null;
+      if (modelsResult._tag === "Success" && modelsResult.value.code === 0) {
+        parsed = parseModelsCliOutput(modelsResult.value.stdout);
       }
-      if (modelsResult.value.code !== 0) {
+      if (parsed === null || parsed.providers.size === 0) {
+        for (const fallbackArgs of [["models"], ["models", "--standalone"]]) {
+          const fallbackResult = yield* runOpenCodeCommand({
+            binaryPath: input.binaryPath,
+            args: fallbackArgs,
+            ...env,
+          }).pipe(Effect.exit);
+          if (fallbackResult._tag === "Success" && fallbackResult.value.code === 0) {
+            const fallbackParsed = parseModelsCliOutput(fallbackResult.value.stdout);
+            if (parsed === null || fallbackParsed.providers.size > 0) {
+              parsed = fallbackParsed;
+            }
+            if (fallbackParsed.providers.size > 0) {
+              break;
+            }
+          }
+        }
+      }
+      if (parsed === null) {
+        if (modelsResult._tag === "Failure") {
+          const cause = Cause.squash(modelsResult.cause);
+          return yield* ensureRuntimeError(
+            "loadInventoryFromCli",
+            `Failed to load OpenCode models: ${openCodeRuntimeErrorDetail(cause)}`,
+            cause,
+          );
+        }
+        const stderrDetail = modelsResult.value.stderr.trim();
         return yield* new OpenCodeRuntimeError({
           operation: "loadInventoryFromCli",
-          detail: `OpenCode models command exited with code ${modelsResult.value.code}.`,
+          detail: `OpenCode models command exited with code ${modelsResult.value.code}.${
+            stderrDetail ? ` stderr: ${stderrDetail.slice(0, 400)}` : ""
+          }`,
         });
-      }
-
-      let parsed = parseModelsCliOutput(modelsResult.value.stdout);
-      if (parsed.providers.size === 0) {
-        // The v2 preview CLI does not know `--verbose` and prints help with
-        // exit 0; retry with a plain `models` invocation before giving up.
-        const plainModelsResult = yield* runOpenCodeCommand({
-          binaryPath: input.binaryPath,
-          args: ["models"],
-          ...env,
-        }).pipe(Effect.exit);
-        if (plainModelsResult._tag === "Success" && plainModelsResult.value.code === 0) {
-          parsed = parseModelsCliOutput(plainModelsResult.value.stdout);
-        }
       }
       const connected = [...parsed.connected];
       const allProviders: ProviderListResponse["all"] = [...parsed.providers.values()].map(
