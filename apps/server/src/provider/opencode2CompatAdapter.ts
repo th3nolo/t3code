@@ -78,8 +78,11 @@ export function createOpencode2Fetch(
       // Non-absolute URL — leave it alone.
     }
 
-    // Rebuild the request with the rewritten URL and injected auth.
-    const headers = new Headers(
+    // Rebuild the request with the rewritten URL and injected auth. Use
+    // globalThis.Headers explicitly: the server bundle imports Effect's
+    // `Headers` (a non-constructor module object) at top scope, which would
+    // otherwise shadow the web global here ("Headers is not a constructor").
+    const headers = new globalThis.Headers(
       input instanceof Request ? input.headers : (init?.headers as HeadersInit | undefined),
     );
     if (authHeader && !headers.has("authorization")) {
