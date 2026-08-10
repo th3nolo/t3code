@@ -338,11 +338,20 @@ export function createOpencode2Fetch(
       const sid = pathname.split("/")[3];
       const origin = new globalThis.URL(targetUrl).origin;
       if (obj.model) {
+        // v2 Model.Ref uses `id`; the bundled SDK sends `modelID`. Without this
+        // remap switchModel returns 400 and the session silently falls back to a
+        // default free model (which 503s) — the selected model is never applied.
+        const m = obj.model as { providerID?: string; id?: string; modelID?: string; variant?: string };
+        const model = {
+          providerID: m.providerID,
+          id: m.id ?? m.modelID,
+          ...(m.variant ? { variant: m.variant } : {}),
+        };
         try {
           await baseFetch(`${origin}${API_PREFIX}/session/${sid}/model${search}`, {
             method: "POST",
             headers: new globalThis.Headers({ authorization: authHeader, "content-type": "application/json" }),
-            body: JSON.stringify({ model: obj.model }),
+            body: JSON.stringify({ model }),
           });
         } catch {
           /* best-effort model switch */
