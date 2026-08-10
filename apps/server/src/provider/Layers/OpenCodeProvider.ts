@@ -13,7 +13,6 @@ import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
   buildServerProvider,
   nonEmptyTrimmed,
-  parseGenericCliVersion,
   providerModelsFromSettings,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
@@ -29,6 +28,20 @@ const OPENCODE_PRESENTATION = {
   showInteractionModeToggle: false,
 } as const;
 const MINIMUM_OPENCODE_VERSION = "1.14.19";
+// The OpenCode v2 preview CLI (`opencode2`, published as @opencode-ai/cli on the
+// next/beta/dev dist-tags) versions every build as `0.0.0-<channel>-<build>`, so a
+// plain semver comparison against MINIMUM_OPENCODE_VERSION would always reject it.
+// Those builds are previews of a future major, not ancient releases.
+const OPENCODE_V2_PREVIEW_VERSION_PATTERN = /^0\.0\.0-(?:next|beta|dev|tui-v2)-/;
+
+// Unlike parseGenericCliVersion, keep the prerelease suffix so v2 preview builds
+// stay distinguishable from a bare 0.0.0, and accept a `v` prefix — opencode2
+// prints "opencode2 v0.0.0-next-17081", where `v0` has no word boundary, so a
+// bare \b\d pattern never matches at all.
+function parseOpenCodeCliVersion(output: string): string | null {
+  const match = output.match(/\bv?(\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?)\b/);
+  return match?.[1] ?? null;
+}
 
 class OpenCodeProbeError extends Data.TaggedError("OpenCodeProbeError")<{
   readonly cause: unknown;
@@ -363,7 +376,7 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     if (versionExit._tag === "Failure") {
       return fallback(Cause.squash(versionExit.cause));
     }
-    version = parseGenericCliVersion(versionExit.value.stdout) ?? null;
+    version = parseOpenCodeCliVersion(versionExit.value.stdout) ?? null;
 
     if (!version) {
       return fallback(
@@ -373,7 +386,8 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
         null,
       );
     }
-    if (compareSemverVersions(version, MINIMUM_OPENCODE_VERSION) < 0) {
+    const isV2PreviewBuild = OPENCODE_V2_PREVIEW_VERSION_PATTERN.test(version);
+    if (!isV2PreviewBuild && compareSemverVersions(version, MINIMUM_OPENCODE_VERSION) < 0) {
       return buildServerProvider({
         presentation: OPENCODE_PRESENTATION,
         enabled: openCodeSettings.enabled,

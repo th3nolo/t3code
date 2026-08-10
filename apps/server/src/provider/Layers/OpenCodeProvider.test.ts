@@ -207,6 +207,45 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
     }),
   );
 
+  it.effect("rejects stable versions older than the minimum", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.versionStdout = "opencode 0.5.0\n";
+      const snapshot = yield* checkOpenCodeProviderStatus(makeOpenCodeSettings(), process.cwd());
+
+      NodeAssert.equal(snapshot.status, "error");
+      NodeAssert.equal(snapshot.installed, true);
+      NodeAssert.equal(snapshot.version, "0.5.0");
+      NodeAssert.equal(
+        snapshot.message,
+        "OpenCode v0.5.0 is too old. Upgrade to v1.14.19 or newer.",
+      );
+    }),
+  );
+
+  it.effect("accepts OpenCode v2 preview builds despite their 0.0.0-prefixed versions", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.versionStdout = "opencode2 v0.0.0-next-17081\n";
+      const snapshot = yield* checkOpenCodeProviderStatus(
+        makeOpenCodeSettings({ binaryPath: "opencode2" }),
+        process.cwd(),
+      );
+
+      NodeAssert.notEqual(snapshot.status, "error");
+      NodeAssert.equal(snapshot.installed, true);
+      NodeAssert.equal(snapshot.version, "0.0.0-next-17081");
+    }),
+  );
+
+  it.effect("accepts OpenCode v2 beta-channel builds", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.versionStdout = "opencode2 v0.0.0-beta-202608100307\n";
+      const snapshot = yield* checkOpenCodeProviderStatus(makeOpenCodeSettings(), process.cwd());
+
+      NodeAssert.notEqual(snapshot.status, "error");
+      NodeAssert.equal(snapshot.version, "0.0.0-beta-202608100307");
+    }),
+  );
+
   it.effect("does not spawn a local server for health check (uses CLI instead)", () =>
     Effect.gen(function* () {
       yield* checkOpenCodeProviderStatus(makeOpenCodeSettings(), process.cwd());
