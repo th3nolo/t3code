@@ -198,11 +198,16 @@ export function translateEvent(
       return partDelta("text");
     case "session.text.ended":
       return partEnded("text");
+    // Terminal events — ALWAYS clear "busy" so a turn never hangs in "working",
+    // however it ends (success, failure, interrupt, or a bare idle).
     case "session.execution.succeeded":
+    case "session.execution.interrupted":
+    case "session.idle":
       return status({ type: "idle" });
     case "session.execution.failed":
+    case "session.step.failed":
       return [
-        ...(sessionID ? [{ type: "session.error", properties: { sessionID, error: d.error ?? {} } }] : []),
+        ...(sessionID && d.error ? [{ type: "session.error", properties: { sessionID, error: d.error } }] : []),
         ...status({ type: "idle" }),
       ];
     default:
