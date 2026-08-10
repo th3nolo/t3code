@@ -146,3 +146,13 @@ Full glossary with file links: `docs/internals/glossary.md`
 
 - Don't verify with browsers or computer use unless the user explicitly agrees or requests it.
 - Security is important, but should not be over-indexed on, especially for dev mode/maintainer-only features.
+
+## Fork note: OpenCode v2 (opencode2) beta support
+
+This fork adds support for the fast-moving **opencode2** preview CLI. If you are
+touching anything OpenCode-related — provider detection, model inventory, or
+chat — **read `docs/opencode2-beta-compat.md` first.** It maps the v2 wire
+protocol (routes, auth, message/event shapes), lists which layer each past fix
+addressed, and gives a repair playbook for when an opencode2 update breaks
+things (it will — the binary and API change every few days). The chat
+translation layer lives in `apps/server/src/provider/opencode2CompatAdapter.ts`.
