@@ -221,7 +221,13 @@ export function parseModelsCliOutput(stdout: string): {
           provider = { id: providerID, name: providerID, models: {} };
           providers.set(providerID, provider);
         }
-        provider.models[modelID] = { id: modelID, name: modelID } as Model;
+        // Kimi K3 supports low/high/max reasoning but the slug-only CLI output
+        // carries no metadata; declare variants so T3 renders the effort dropdown.
+        provider.models[modelID] = {
+          id: modelID,
+          name: modelID,
+          ...(providerID === "kimi-for-coding" ? { variants: { low: {}, high: {}, max: {} } } : {}),
+        } as Model;
       }
     }
     if (currentSlug !== null && jsonLines.length > 0) {

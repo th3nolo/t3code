@@ -164,6 +164,10 @@ function inferDefaultVariant(
   if (variants.length === 1) {
     return variants[0];
   }
+  // Kimi K3 (custom provider) exposes low/high/max reasoning; default to high.
+  if (providerID === "kimi-for-coding") {
+    return variants.includes("high") ? "high" : undefined;
+  }
   if (providerID === "anthropic" || providerID.startsWith("google")) {
     return variants.includes("high") ? "high" : undefined;
   }
