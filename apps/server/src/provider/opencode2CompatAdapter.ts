@@ -54,10 +54,13 @@ export function createOpencode2Fetch(
   baseFetch: typeof fetch,
   options: Opencode2CompatOptions = {},
 ): typeof fetch {
-  const authHeader =
-    options.password != null && options.password.length > 0
-      ? `Basic ${Buffer.from(`opencode:${options.password}`, "utf8").toString("base64")}`
-      : null;
+  // v2 servers require Basic auth; v1 servers have none. Use password presence
+  // as the v2 signal: with no password, return the base fetch untouched so a
+  // v1 (or external unauthenticated) server sees no path rewrite or reshaping.
+  if (options.password == null || options.password.length === 0) {
+    return baseFetch;
+  }
+  const authHeader = `Basic ${Buffer.from(`opencode:${options.password}`, "utf8").toString("base64")}`;
 
   return async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const originalUrl = input instanceof Request ? input.url : String(input);
@@ -178,17 +181,165 @@ function toV1Message(message: unknown): unknown {
 }
 
 /**
- * Translate the v2 `session.*` SSE event stream into the v1 events T3's
- * reducer consumes. NOT YET IMPLEMENTED — passes the stream through unchanged.
+ * Synthesize a stable v1 `partID` from v2's `(assistantMessageID, kind,
+ * ordinal)` triple. v2 streams have no part identity of their own; T3's reducer
+ * keys everything on `partID`, so start/delta/end for one content run must all
+ * resolve to the same id.
+ */
+function partId(messageID: string, kind: "text" | "reasoning", ordinal: number): string {
+  return `${messageID}::${kind}::${ordinal}`;
+}
+
+/**
+ * Map a single v2 `session.*` event to zero or more v1 events (`{type,
+ * properties}`) that T3's OpenCodeAdapter switch understands. `startTimes`
+ * carries per-part start timestamps across events in the stream so `*.ended`
+ * can emit a `time: {start, end}` — the final text part MUST carry `time.end`
+ * or T3 never marks the assistant turn complete.
  *
- * To implement: read the SSE body, and for each `data:` JSON event map the v2
- * `type` (server.connected, session.created, session.step.started,
- * session.reasoning.delta, session.text.delta, session.step.finished, …) to
- * the corresponding v1 event (session.updated, message.updated,
- * message.part.updated, …), re-serializing as SSE. See the event table in
- * `docs/opencode2-beta-compat.md`. This is the load-bearing piece for live
- * streaming chat and the most likely thing to drift between builds.
+ * Exported for unit testing. Fail-open: unmapped event types return [].
+ */
+export function translateEvent(
+  event: { type?: string; created?: number; data?: Record<string, unknown> },
+  startTimes: Map<string, number>,
+): Array<{ type: string; properties: Record<string, unknown> }> {
+  const d = event.data ?? {};
+  const ts = event.created ?? 0;
+  const sessionID = d.sessionID as string | undefined;
+  const messageID = d.assistantMessageID as string | undefined;
+  const ordinal = typeof d.ordinal === "number" ? d.ordinal : 0;
+
+  const partStarted = (kind: "text" | "reasoning") => {
+    if (!messageID || !sessionID) return [];
+    const id = partId(messageID, kind, ordinal);
+    startTimes.set(id, ts);
+    return [
+      {
+        type: "message.part.updated",
+        properties: { sessionID, part: { id, messageID, type: kind, text: "", time: { start: ts } } },
+      },
+    ];
+  };
+  const partDelta = (kind: "text" | "reasoning") => {
+    if (!messageID || !sessionID) return [];
+    return [
+      {
+        type: "message.part.delta",
+        properties: { sessionID, partID: partId(messageID, kind, ordinal), delta: String(d.delta ?? "") },
+      },
+    ];
+  };
+  const partEnded = (kind: "text" | "reasoning") => {
+    if (!messageID || !sessionID) return [];
+    const id = partId(messageID, kind, ordinal);
+    const start = startTimes.get(id) ?? ts;
+    return [
+      {
+        type: "message.part.updated",
+        properties: {
+          sessionID,
+          part: { id, messageID, type: kind, text: String(d.text ?? ""), time: { start, end: ts } },
+        },
+      },
+    ];
+  };
+  const status = (statusPayload: Record<string, unknown>) =>
+    sessionID ? [{ type: "session.status", properties: { sessionID, status: statusPayload } }] : [];
+
+  switch (event.type) {
+    case "session.created":
+      return sessionID
+        ? [{ type: "session.updated", properties: { sessionID, info: { id: sessionID, ...d } } }]
+        : [];
+    case "session.execution.started":
+      return status({ type: "busy" });
+    case "session.step.started":
+      // Register the assistant message role before any of its parts arrive, so
+      // messageRoleForPart resolves "assistant" and deltas are emitted.
+      return messageID && sessionID
+        ? [{ type: "message.updated", properties: { sessionID, info: { id: messageID, role: "assistant" } } }]
+        : [];
+    case "session.retry.scheduled": {
+      const err = d.error as { message?: string } | undefined;
+      return status({ type: "retry", message: err?.message ?? "Retrying…" });
+    }
+    case "session.reasoning.started":
+      return partStarted("reasoning");
+    case "session.reasoning.delta":
+      return partDelta("reasoning");
+    case "session.reasoning.ended":
+      return partEnded("reasoning");
+    case "session.text.started":
+      return partStarted("text");
+    case "session.text.delta":
+      return partDelta("text");
+    case "session.text.ended":
+      return partEnded("text");
+    case "session.execution.succeeded":
+      return status({ type: "idle" });
+    case "session.execution.failed":
+      return [
+        ...(sessionID ? [{ type: "session.error", properties: { sessionID, error: d.error ?? {} } }] : []),
+        ...status({ type: "idle" }),
+      ];
+    default:
+      // server.connected, session.input.*, session.instructions.updated,
+      // session.step.ended, session.usage.updated, etc. — no v1 equivalent
+      // T3 needs; drop them.
+      return [];
+  }
+}
+
+/**
+ * Translate the v2 `session.*` SSE stream into the v1 events T3's reducer
+ * consumes, re-framed as Server-Sent Events. Fail-open: any line we can't
+ * parse or map is dropped rather than breaking the stream.
+ *
+ * See `docs/opencode2-beta-compat.md` for the full event mapping table. This is
+ * the load-bearing piece for live streaming chat and the most drift-prone —
+ * re-capture the event payloads and re-verify `translateEvent` after an
+ * opencode2 update.
  */
 function translateEventStream(response: Response): Response {
-  return response;
+  if (!response.body) return response;
+
+  const startTimes = new Map<string, number>();
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = "";
+
+  const emit = (controller: { enqueue: (chunk: Uint8Array) => void }, frame: string) => {
+    const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
+    if (!dataLine) return;
+    let v2Event: { type?: string; created?: number; data?: Record<string, unknown> };
+    try {
+      v2Event = JSON.parse(dataLine.slice(5).trim());
+    } catch {
+      return;
+    }
+    for (const v1Event of translateEvent(v2Event, startTimes)) {
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(v1Event)}\n\n`));
+    }
+  };
+
+  const transform = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let idx: number;
+      while ((idx = buffer.indexOf("\n\n")) >= 0) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        emit(controller, frame);
+      }
+    },
+    flush(controller) {
+      if (buffer.trim().length > 0) emit(controller, buffer);
+    },
+  });
+
+  return new Response(response.body.pipeThrough(transform), {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
 }

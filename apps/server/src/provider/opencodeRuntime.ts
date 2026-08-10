@@ -30,6 +30,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { isWindowsCommandNotFound } from "../processRunner.ts";
+import { createOpencode2Fetch } from "./opencode2CompatAdapter.ts";
 import { collectStreamAsString } from "./providerSnapshot.ts";
 import * as NetService from "@t3tools/shared/Net";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -42,11 +43,15 @@ const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 30_000;
 const DEFAULT_HOSTNAME = "127.0.0.1";
 export interface OpenCodeServerProcess {
   readonly url: string;
+  /** Basic-auth password printed by the v2 preview server on startup (v1: absent). */
+  readonly password?: string;
   readonly exitCode: Effect.Effect<number, never>;
 }
 
 export interface OpenCodeServerConnection {
   readonly url: string;
+  /** Basic-auth password for a v2 preview server we spawned (v1/external: absent). */
+  readonly password?: string;
   readonly exitCode: Effect.Effect<number, never> | null;
   readonly external: boolean;
 }
@@ -154,13 +159,27 @@ export interface OpenCodeRuntimeShape {
   }) => Effect.Effect<OpenCodeInventory, OpenCodeRuntimeError>;
 }
 
-function parseServerUrlFromOutput(output: string): string | null {
+// v1 prints "opencode server listening on <url>"; the v2 preview prints
+// "server listening on <url>". Match the shared "server listening … on <url>"
+// shape so both are detected as ready. Exported for testing.
+export function parseServerUrlFromOutput(output: string): string | null {
   for (const line of output.split("\n")) {
-    if (!line.startsWith(OPENCODE_SERVER_READY_PREFIX)) {
+    if (!line.includes("server listening")) {
       continue;
     }
     const match = line.match(/on\s+(https?:\/\/[^\s]+)/);
-    return match?.[1] ?? null;
+    if (match?.[1]) return match[1];
+  }
+  return null;
+}
+
+// The v2 preview server prints "server password <token>" on startup and
+// requires HTTP Basic auth (opencode:<token>) even on localhost. v1 printed no
+// password. Exported for testing.
+export function parseServerPasswordFromOutput(output: string): string | null {
+  for (const line of output.split("\n")) {
+    const match = line.match(/server password\s+(\S+)/);
+    if (match?.[1]) return match[1];
   }
   return null;
 }
@@ -594,8 +613,14 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         });
       }
 
+      // The v2 preview server prints its Basic-auth password on startup; capture
+      // it so the SDK client can authenticate. v1 prints none (stays null).
+      const finalStdout = yield* Ref.get(stdoutRef);
+      const password = parseServerPasswordFromOutput(finalStdout);
+
       return {
         url: readyOption.value,
+        ...(password ? { password } : {}),
         exitCode: child.exitCode.pipe(
           Effect.map(Number),
           Effect.orElseSucceed(() => 0),
@@ -623,25 +648,29 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
     }).pipe(
       Effect.map((server) => ({
         url: server.url,
+        ...(server.password ? { password: server.password } : {}),
         exitCode: server.exitCode,
         external: false,
       })),
     );
   };
 
-  const createOpenCodeSdkClient: OpenCodeRuntimeShape["createOpenCodeSdkClient"] = (input) =>
-    createOpencodeClient({
+  const createOpenCodeSdkClient: OpenCodeRuntimeShape["createOpenCodeSdkClient"] = (input) => {
+    // Route all SDK traffic through the v2 compat adapter: it rewrites paths
+    // under /api, injects Basic auth from the password, and reshapes v2
+    // responses + the SSE event stream into the shapes T3 expects. Every
+    // transform is fail-open, so a v1 server (no /api routes, no password) is
+    // unaffected. See opencode2CompatAdapter.ts / docs/opencode2-beta-compat.md.
+    const compatFetch = createOpencode2Fetch(globalThis.fetch, {
+      password: input.serverPassword ?? null,
+    });
+    return createOpencodeClient({
       baseUrl: input.baseUrl,
       directory: input.directory,
-      ...(input.serverPassword
-        ? {
-            headers: {
-              Authorization: `Basic ${Buffer.from(`opencode:${input.serverPassword}`, "utf8").toString("base64")}`,
-            },
-          }
-        : {}),
+      fetch: compatFetch,
       throwOnError: true,
     });
+  };
 
   const loadProviders = (client: OpencodeClient) =>
     runOpenCodeSdk("provider.list", () => client.provider.list()).pipe(

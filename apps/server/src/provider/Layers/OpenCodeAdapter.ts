@@ -1212,7 +1212,17 @@ export function makeOpenCodeAdapter(
               const client = openCodeRuntime.createOpenCodeSdkClient({
                 baseUrl: server.url,
                 directory,
-                ...(server.external && serverPassword ? { serverPassword } : {}),
+                // External servers use the configured password; servers we
+                // spawn use the password the v2 preview printed on startup
+                // (captured by the runtime). Either enables the v2 compat
+                // adapter's auth + reshaping.
+                ...(server.external
+                  ? serverPassword
+                    ? { serverPassword }
+                    : {}
+                  : server.password
+                    ? { serverPassword: server.password }
+                    : {}),
               });
               const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
               if (mcpSession && !server.external) {

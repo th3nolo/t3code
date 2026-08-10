@@ -2,7 +2,7 @@ import * as NodeAssert from "node:assert/strict";
 
 import { describe, it } from "vite-plus/test";
 
-import { transformJsonBody } from "./opencode2CompatAdapter.ts";
+import { transformJsonBody, translateEvent } from "./opencode2CompatAdapter.ts";
 
 // Fixtures captured verbatim from opencode2 v0.0.0-next-17086.
 const assistantMsg = {
@@ -69,5 +69,65 @@ describe("opencode2CompatAdapter.transformJsonBody", () => {
     NodeAssert.equal(transformJsonBody("/api/session", { data: { id: "ses_1" } }), undefined);
     NodeAssert.equal(transformJsonBody("/api/provider", { unexpected: true }), undefined);
     NodeAssert.equal(transformJsonBody("/api/session/ses_1/message", { data: "oops" }), undefined);
+  });
+});
+
+describe("opencode2CompatAdapter.translateEvent", () => {
+  const SID = "ses_1";
+  const MID = "msg_1";
+
+  it("maps session lifecycle to busy/idle session.status", () => {
+    const t = new Map<string, number>();
+    NodeAssert.deepEqual(translateEvent({ type: "session.execution.started", data: { sessionID: SID } }, t), [
+      { type: "session.status", properties: { sessionID: SID, status: { type: "busy" } } },
+    ]);
+    NodeAssert.deepEqual(translateEvent({ type: "session.execution.succeeded", data: { sessionID: SID } }, t), [
+      { type: "session.status", properties: { sessionID: SID, status: { type: "idle" } } },
+    ]);
+  });
+
+  it("registers the assistant message role on step.started", () => {
+    const out = translateEvent(
+      { type: "session.step.started", data: { sessionID: SID, assistantMessageID: MID } },
+      new Map(),
+    );
+    NodeAssert.deepEqual(out, [
+      { type: "message.updated", properties: { sessionID: SID, info: { id: MID, role: "assistant" } } },
+    ]);
+  });
+
+  it("streams a text run as start(part.updated) → delta → end(part.updated w/ time.end)", () => {
+    const t = new Map<string, number>();
+    const started = translateEvent(
+      { type: "session.text.started", created: 100, data: { sessionID: SID, assistantMessageID: MID, ordinal: 0 } },
+      t,
+    );
+    const pid = (started[0]!.properties.part as { id: string }).id;
+    NodeAssert.equal((started[0]!.properties.part as { type: string }).type, "text");
+
+    const delta = translateEvent(
+      { type: "session.text.delta", data: { sessionID: SID, assistantMessageID: MID, ordinal: 0, delta: "PO" } },
+      t,
+    );
+    NodeAssert.deepEqual(delta, [
+      { type: "message.part.delta", properties: { sessionID: SID, partID: pid, delta: "PO" } },
+    ]);
+
+    const ended = translateEvent(
+      { type: "session.text.ended", created: 200, data: { sessionID: SID, assistantMessageID: MID, ordinal: 0, text: "PONG" } },
+      t,
+    );
+    const endedPart = ended[0]!.properties.part as { id: string; text: string; time: { start: number; end: number } };
+    NodeAssert.equal(endedPart.id, pid); // same synthesized partID across the run
+    NodeAssert.equal(endedPart.text, "PONG");
+    NodeAssert.equal(endedPart.time.start, 100);
+    NodeAssert.equal(endedPart.time.end, 200); // required or T3 never completes the turn
+  });
+
+  it("drops events with no v1 equivalent", () => {
+    const t = new Map<string, number>();
+    NodeAssert.deepEqual(translateEvent({ type: "server.connected", data: {} }, t), []);
+    NodeAssert.deepEqual(translateEvent({ type: "session.step.ended", data: { sessionID: SID } }, t), []);
+    NodeAssert.deepEqual(translateEvent({ type: "session.usage.updated", data: { sessionID: SID } }, t), []);
   });
 });

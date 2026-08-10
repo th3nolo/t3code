@@ -21,12 +21,18 @@ track the CLI build — ignore it).
 | Model **list** (inventory) | ✅ done, via CLI `models` | `opencodeRuntime.ts` `loadInventoryFromCli` |
 | Version **advisory** (no false "update" nag) | ✅ done | `providerMaintenance.ts` |
 | Background **service** auto-start before probes | ✅ done | `opencodeRuntime.ts` |
-| **Chat** (sessions/prompt/streaming) | ⚠️ **not wired** — protocol proven, adapter unbuilt | see "Chat" below |
+| **Chat** (sessions/prompt/streaming) | 🟡 **built, needs live-UI validation** | `opencode2CompatAdapter.ts` |
 
-Raw chat **does work** against opencode2 — verified end to end at the HTTP
-level (create session → prompt free model → assistant reply received). The gap
-is purely the translation layer between T3's bundled v1-era SDK expectations
-and v2's actual wire protocol.
+Raw chat **works** against opencode2 — verified end to end at the HTTP level
+(create session → prompt free model → assistant reply received). The
+translation layer between T3's bundled v1-era SDK expectations and v2's wire
+protocol is now built (path rewrite + auth + response reshaping + SSE event
+translation) and unit-tested — the `translateEvent` mapping was validated by
+replaying a real captured turn through a faithful reducer simulation (it
+reconstructs the assistant text and completes the turn). What remains is
+**live validation inside T3's actual Electron UI**: the SSE translation only
+fully proves out against the real reducer, and the spawn/connect wiring (below)
+hasn't been exercised end to end in the running app.
 
 ---
 
@@ -160,35 +166,45 @@ T3's reducer consumes **v1** event names (`message.updated`,
 
 ---
 
-## Building the chat adapter (design)
+## The chat adapter (built — how it works)
 
-Single injection point: T3 constructs the client once via
-`createOpencodeClient({...})` in `apps/server/src/provider/opencodeRuntime.ts`
-(bundled call site: `createOpenCodeSdkClient`). The hey-api `Config` accepts a
-`fetch?: typeof fetch` option — pass a wrapper that:
+Single injection point: T3 constructs the client via `createOpencodeClient` in
+`createOpenCodeSdkClient` (`opencodeRuntime.ts`). The hey-api `Config` accepts a
+`fetch?: typeof fetch`, so we pass `createOpencode2Fetch(globalThis.fetch,
+{password})` from `opencode2CompatAdapter.ts`, which:
 
-1. **Rewrites paths** `/(provider|agent|session|event|…)` → `/api/$1` when not
-   already prefixed.
-2. **Injects Basic auth** from the service password (read via `pair`/stdout).
-3. **Reshapes responses** per the map above (provider.list, message.list are
-   the load-bearing ones). Guard each transform so a shape it doesn't
-   recognize passes through untouched — that's what makes drift degrade
-   gracefully instead of crashing.
-4. **Translates the SSE event stream** — intercept the `/api/event` response,
-   re-emit each `session.*` event as the v1 event T3's reducer expects. Start
-   from the type table above; expect to extend it.
+1. **Rewrites paths** `/(provider|agent|session|event|…)` → `/api/$1`.
+2. **Injects Basic auth** from the server password.
+3. **Reshapes JSON responses** (`transformJsonBody`) — provider.list and
+   message.list are the load-bearing ones. Fail-open: unrecognized shapes pass
+   through untouched, so drift degrades instead of crashing.
+4. **Translates the SSE event stream** (`translateEvent` + `translateEventStream`)
+   — each v2 `session.*` event becomes the v1 event(s) T3's reducer expects
+   (see the mapping in the code + the event table above). Synthesizes a stable
+   `partID` from `(assistantMessageID, kind, ordinal)` and, crucially, sets
+   `time.end` on the final text part so T3 marks the turn complete.
 
-Also required, on the spawn/connect path:
-- `startOpenCodeServerProcess` waits for the literal prefix
-  `"opencode server listening"`. v2 prints `"server listening on <url>"` —
-  **update the ready-prefix** or the server is never marked ready.
-- Prefer connecting to the **background service** (`service start` + `pair`)
-  over spawning a bare `serve`, so providers/auth are present. Capture the
-  rotating URL + password each time; never cache them.
+**v1/v2 gating:** the adapter is a **pure pass-through when no password is
+present**. v2 requires auth, v1 has none — so password-presence is the v2
+signal, and a v1/unauthenticated server sees no path rewrite or reshaping.
 
-Validate end to end by driving T3's actual UI (send a message, watch it stream)
-— unit-shape tests are necessary but not sufficient, because the event
-translation only shows up in the live reducer.
+Spawn/connect wiring (also done):
+- `parseServerUrlFromOutput` now matches both `"opencode server listening on"`
+  (v1) and `"server listening on"` (v2).
+- `parseServerPasswordFromOutput` captures the password the v2 server prints on
+  startup; it flows through `OpenCodeServerProcess/Connection.password` into
+  `createOpenCodeSdkClient` as `serverPassword` for servers we spawn.
+- A spawned `serve` loads its providers/auth **asynchronously (~3s)** — the
+  provider list is briefly empty right after startup. T3's inventory already
+  retries; don't treat an initial empty list as failure. (This is why the
+  background service *looked* required earlier — it wasn't, it was just warm.)
+
+### What still needs doing — live-UI validation
+Unit-shape tests + the reducer simulation pass, but the real proof is driving
+T3's Electron UI: send a message and watch it stream. Re-capture events and
+re-verify `translateEvent` after any opencode2 update — the event stream is the
+most drift-prone surface. If streaming looks wrong, diff a freshly captured
+turn's event types/payloads against the table above.
 
 ---
 
@@ -217,4 +233,6 @@ translation only shows up in the live reducer.
 ## Commit trail (fork branch `fix/opencode2-beta`)
 - version gate + parser; models slug parse + fallbacks; version advisory +
   probe hardening; service auto-start. (See `git log` on this branch.)
-- The chat adapter is **not yet committed** — this doc is the spec for it.
+- chat adapter: path/auth/response reshaping + SSE `translateEvent`; wired into
+  `createOpenCodeSdkClient`; server ready-prefix + password capture. Verified
+  against `v0.0.0-next-17086`; live-UI validation pending.

@@ -2,7 +2,42 @@ import * as NodeAssert from "node:assert/strict";
 
 import { describe, it } from "vite-plus/test";
 
-import { parseModelsCliOutput, parseAgentListCliOutput } from "./opencodeRuntime.ts";
+import {
+  parseModelsCliOutput,
+  parseAgentListCliOutput,
+  parseServerUrlFromOutput,
+  parseServerPasswordFromOutput,
+} from "./opencodeRuntime.ts";
+
+describe("parseServerUrlFromOutput", () => {
+  it("matches the v1 'opencode server listening on <url>' line", () => {
+    NodeAssert.equal(
+      parseServerUrlFromOutput("opencode server listening on http://127.0.0.1:4096\n"),
+      "http://127.0.0.1:4096",
+    );
+  });
+  it("matches the v2 preview 'server listening on <url>' line", () => {
+    NodeAssert.equal(
+      parseServerUrlFromOutput("server listening on http://127.0.0.1:49374\n"),
+      "http://127.0.0.1:49374",
+    );
+  });
+  it("returns null when no ready line is present", () => {
+    NodeAssert.equal(parseServerUrlFromOutput("booting…\n"), null);
+  });
+});
+
+describe("parseServerPasswordFromOutput", () => {
+  it("extracts the v2 preview 'server password <token>' line", () => {
+    NodeAssert.equal(
+      parseServerPasswordFromOutput("server listening on http://127.0.0.1:44560\nserver password DksR-49gXm_A8\n"),
+      "DksR-49gXm_A8",
+    );
+  });
+  it("returns null for v1 output that prints no password", () => {
+    NodeAssert.equal(parseServerPasswordFromOutput("opencode server listening on http://127.0.0.1:4096\n"), null);
+  });
+});
 
 describe("parseModelsCliOutput", () => {
   it("parses a single model from a single provider", () => {
