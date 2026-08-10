@@ -190,6 +190,21 @@ export function parseModelsCliOutput(stdout: string): {
   const jsonLines: Array<string> = [];
 
   const flushModel = () => {
+    // The OpenCode v2 preview CLI prints bare `provider/model` slug lines with
+    // no JSON metadata block; synthesize a minimal model so those still list.
+    if (currentSlug !== null && jsonLines.join("").trim().length === 0) {
+      const separator = currentSlug.indexOf("/");
+      if (separator > 0) {
+        const providerID = currentSlug.slice(0, separator);
+        const modelID = currentSlug.slice(separator + 1);
+        let provider = providers.get(providerID);
+        if (!provider) {
+          provider = { id: providerID, name: providerID, models: {} };
+          providers.set(providerID, provider);
+        }
+        provider.models[modelID] = { id: modelID, name: modelID } as Model;
+      }
+    }
     if (currentSlug !== null && jsonLines.length > 0) {
       const jsonStr = jsonLines.join("\n").trim();
       if (jsonStr.length > 0) {
@@ -705,7 +720,19 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         });
       }
 
-      const parsed = parseModelsCliOutput(modelsResult.value.stdout);
+      let parsed = parseModelsCliOutput(modelsResult.value.stdout);
+      if (parsed.providers.size === 0) {
+        // The v2 preview CLI does not know `--verbose` and prints help with
+        // exit 0; retry with a plain `models` invocation before giving up.
+        const plainModelsResult = yield* runOpenCodeCommand({
+          binaryPath: input.binaryPath,
+          args: ["models"],
+          ...env,
+        }).pipe(Effect.exit);
+        if (plainModelsResult._tag === "Success" && plainModelsResult.value.code === 0) {
+          parsed = parseModelsCliOutput(plainModelsResult.value.stdout);
+        }
+      }
       const connected = [...parsed.connected];
       const allProviders: ProviderListResponse["all"] = [...parsed.providers.values()].map(
         (provider) => ({

@@ -64,6 +64,35 @@ describe("parseModelsCliOutput", () => {
     NodeAssert.equal(result.connected.length, 0);
   });
 
+  it("synthesizes minimal models from slug-only lines (OpenCode v2 preview format)", () => {
+    const stdout = [
+      "anthropic/claude-sonnet-4-5",
+      "anthropic/claude-haiku-4-5",
+      "deepseek/deepseek-chat",
+    ].join("\n");
+
+    const result = parseModelsCliOutput(stdout);
+    NodeAssert.equal(result.providers.size, 2);
+    NodeAssert.equal([...result.connected].sort().join(","), "anthropic,deepseek");
+    NodeAssert.equal(Object.keys(result.providers.get("anthropic")!.models).length, 2);
+
+    const model = result.providers.get("deepseek")!.models["deepseek-chat"]!;
+    NodeAssert.equal(model.id, "deepseek-chat");
+    NodeAssert.equal(model.name, "deepseek-chat");
+  });
+
+  it("parses help text (v2 reaction to unknown --verbose flag) to zero providers", () => {
+    const stdout = [
+      "DESCRIPTION",
+      "  List all available models",
+      "USAGE",
+      "  opencode2 models [flags]",
+    ].join("\n");
+
+    const result = parseModelsCliOutput(stdout);
+    NodeAssert.equal(result.providers.size, 0);
+  });
+
   it("skips unparseable JSON blocks", () => {
     const stdout = [
       "anthropic/claude-sonnet-4-5",
