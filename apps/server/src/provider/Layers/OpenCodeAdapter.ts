@@ -694,6 +694,24 @@ export function makeOpenCodeAdapter(
           class: "transport_error",
         },
       }).pipe(Effect.ignore);
+      // Close the in-flight turn on unexpected death. `session.exited` alone
+      // flips the session to "stopped" but leaves the active turn without a
+      // terminal, so the assistant bubble + elapsed timer can hang forever —
+      // indistinguishable from "still working". Mirror the `session.error` path
+      // so a dead process fails the turn cleanly (timer stops, bubble = failed).
+      if (turnId) {
+        yield* emit({
+          ...(yield* buildEventBase({
+            threadId: context.session.threadId,
+            turnId,
+          })),
+          type: "turn.completed",
+          payload: {
+            state: "failed",
+            errorMessage: message,
+          },
+        }).pipe(Effect.ignore);
+      }
       yield* emit({
         ...(yield* buildEventBase({
           threadId: context.session.threadId,

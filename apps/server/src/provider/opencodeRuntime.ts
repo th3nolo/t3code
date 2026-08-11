@@ -227,7 +227,7 @@ export function parseModelsCliOutput(stdout: string): {
           id: modelID,
           name: modelID,
           ...(providerID === "kimi-for-coding" ? { variants: { low: {}, high: {}, max: {} } } : {}),
-        } as Model;
+        } as unknown as Model;
       }
     }
     if (currentSlug !== null && jsonLines.length > 0) {

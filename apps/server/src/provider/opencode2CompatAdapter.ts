@@ -57,7 +57,8 @@ function toV1Message(message: unknown): unknown {
   if (!m || typeof m !== "object") return message;
   const role = m.type; // v2 uses `type` where v1 used `info.role`
   let parts: Array<{ type: string; text?: string }>;
-  if (Array.isArray(m.content)) parts = m.content.map((c) => ({ type: c.type ?? "text", text: c.text }));
+  if (Array.isArray(m.content))
+    parts = m.content.map((c) => ({ type: c.type ?? "text", ...(c.text !== undefined ? { text: c.text } : {}) }));
   else if (typeof m.text === "string") parts = [{ type: "text", text: m.text }];
   else parts = [];
   const { content: _c, text: _t, type: _ty, ...rest } = m;
@@ -76,7 +77,7 @@ export function transformJsonBody(method: string, pathname: string, body: unknow
     const data = (body as { data?: unknown })?.data;
     if (Array.isArray(data)) {
       const all = data.map((p) => ({ ...(p as object), models: (p as { models?: unknown }).models ?? {} }));
-      return { all, connected: all.map((p: { id?: string }) => p.id).filter(Boolean), default: {} };
+      return { all, connected: all.map((p) => (p as { id?: string }).id).filter(Boolean), default: {} };
     }
     return undefined;
   }
@@ -134,21 +135,35 @@ export function translateEvent(
   const messageID = d.assistantMessageID as string | undefined;
   const ordinal = typeof d.ordinal === "number" ? d.ordinal : 0;
 
-  const partStarted = (kind: "text" | "reasoning") => {
+  // Self-registering start: emits the assistant-role registration (message.updated)
+  // AND the part registration (message.part.updated). SSE has no replay, so a
+  // subscription that races a turn's start (cold start) can first observe a
+  // `*.delta` whose `*.started` it never received — and T3's reducer silently
+  // drops deltas for a part it never saw start, or whose message role is unknown.
+  // Emitting the start lazily the first time a delta/ended references an unseen
+  // part makes reasoning + text survive that race. `startTimes` doubles as the
+  // "already started" registry, so this is idempotent: a real `*.started` that
+  // follows a synthesized one is a no-op.
+  const emitStart = (kind: "text" | "reasoning") => {
     if (!messageID || !sessionID) return [];
     const id = partId(messageID, kind, ordinal);
     startTimes.set(id, ts);
     return [
+      { type: "message.updated", properties: { sessionID, info: { id: messageID, role: "assistant" } } },
       {
         type: "message.part.updated",
         properties: { sessionID, part: { id, messageID, type: kind, text: "", time: { start: ts } } },
       },
     ];
   };
+  const ensureStart = (kind: "text" | "reasoning") =>
+    !messageID || !sessionID || startTimes.has(partId(messageID, kind, ordinal)) ? [] : emitStart(kind);
+  const partStarted = (kind: "text" | "reasoning") => ensureStart(kind);
   const partDelta = (kind: "text" | "reasoning") =>
     !messageID || !sessionID
       ? []
       : [
+          ...ensureStart(kind),
           {
             type: "message.part.delta",
             properties: { sessionID, partID: partId(messageID, kind, ordinal), delta: String(d.delta ?? "") },
@@ -156,9 +171,11 @@ export function translateEvent(
         ];
   const partEnded = (kind: "text" | "reasoning") => {
     if (!messageID || !sessionID) return [];
+    const ensure = ensureStart(kind);
     const id = partId(messageID, kind, ordinal);
     const start = startTimes.get(id) ?? ts;
     return [
+      ...ensure,
       {
         type: "message.part.updated",
         properties: {
@@ -287,7 +304,10 @@ export function createOpencode2Fetch(
   if (options.password == null || options.password.length === 0) return baseFetch;
   const authHeader = `Basic ${Buffer.from(`opencode:${options.password}`, "utf8").toString("base64")}`;
 
-  return async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+  const wrapped = async (
+    input: Parameters<typeof fetch>[0],
+    init?: Parameters<typeof fetch>[1],
+  ): Promise<Response> => {
     const isReq = input instanceof Request;
     const originalUrl = isReq ? input.url : String(input);
     const method = ((isReq ? input.method : init?.method) ?? "GET").toUpperCase();
@@ -308,7 +328,7 @@ export function createOpencode2Fetch(
     }
 
     const headers = new globalThis.Headers(
-      isReq ? input.headers : (init?.headers as HeadersInit | undefined),
+      isReq ? input.headers : (init?.headers as ConstructorParameters<typeof globalThis.Headers>[0] | undefined),
     );
     if (!headers.has("authorization")) headers.set("authorization", authHeader);
 
@@ -372,4 +392,8 @@ export function createOpencode2Fetch(
     if (pathname === null) return response;
     return reshapeResponse(method, pathname, response);
   };
+  // The SDK only ever invokes this as a function, but `typeof fetch` also
+  // declares a `preconnect` static our wrapper doesn't implement — assert the
+  // shape so callers typed against `typeof fetch` still accept it.
+  return wrapped as unknown as typeof fetch;
 }
